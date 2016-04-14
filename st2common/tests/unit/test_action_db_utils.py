@@ -133,6 +133,50 @@ class ActionDBUtilsTestCase(DbTestCase):
         self.assertEqual(newliveaction_db.end_timestamp, now)
 
     @mock.patch.object(LiveActionPublisher, 'publish_state', mock.MagicMock())
+    def test_update_liveaction_result_with_dotted_key(self):
+        liveaction_db = LiveActionDB()
+        liveaction_db.status = 'initializing'
+        liveaction_db.start_timestamp = get_datetime_utc_now()
+        liveaction_db.action = ResourceReference(
+            name=ActionDBUtilsTestCase.action_db.name,
+            pack=ActionDBUtilsTestCase.action_db.pack).ref
+        params = {
+            'actionstr': 'foo',
+            'some_key_that_aint_exist_in_action_or_runner': 'bar',
+            'runnerint': 555
+        }
+        liveaction_db.parameters = params
+        liveaction_db = LiveAction.add_or_update(liveaction_db)
+        origliveaction_db = copy.copy(liveaction_db)
+
+        # Update by id.
+        newliveaction_db = action_db_utils.update_liveaction_status(
+            status='running', liveaction_id=liveaction_db.id)
+
+        # Verify id didn't change.
+        self.assertEqual(origliveaction_db.id, newliveaction_db.id)
+        self.assertEqual(newliveaction_db.status, 'running')
+
+        # Verify that state is published.
+        self.assertTrue(LiveActionPublisher.publish_state.called)
+        LiveActionPublisher.publish_state.assert_called_once_with(newliveaction_db, 'running')
+
+        now = get_datetime_utc_now()
+        status = 'succeeded'
+        result = {'a': 1, 'b': True, 'a.b.c': 'abc'}
+        context = {'third_party_id': uuid.uuid4().hex}
+        newliveaction_db = action_db_utils.update_liveaction_status(
+            status=status, result=result, context=context, end_timestamp=now,
+            liveaction_id=liveaction_db.id)
+
+        self.assertEqual(origliveaction_db.id, newliveaction_db.id)
+        self.assertEqual(newliveaction_db.status, status)
+        self.assertIn('a.b.c', result.keys())
+        self.assertDictEqual(newliveaction_db.result, result)
+        self.assertDictEqual(newliveaction_db.context, context)
+        self.assertEqual(newliveaction_db.end_timestamp, now)
+
+    @mock.patch.object(LiveActionPublisher, 'publish_state', mock.MagicMock())
     def test_update_LiveAction_status_invalid(self):
         liveaction_db = LiveActionDB()
         liveaction_db.status = 'initializing'
@@ -190,10 +234,77 @@ class ActionDBUtilsTestCase(DbTestCase):
             'runnerint': 555
         }
         pos_args, named_args = action_db_utils.get_args(params, ActionDBUtilsTestCase.action_db)
-        self.assertEqual(pos_args, '20 foo', 'Positional args not parsed correctly.')
+        self.assertListEqual(pos_args, ['20', '', 'foo', '', '', '', ''],
+                            'Positional args not parsed correctly.')
         self.assertTrue('actionint' not in named_args)
         self.assertTrue('actionstr' not in named_args)
         self.assertEqual(named_args.get('runnerint'), 555)
+
+        # Test serialization for different positional argument types and values
+        # Test all the values provided
+        params = {
+            'actionint': 1,
+            'actionfloat': 1.5,
+            'actionstr': 'string value',
+            'actionbool': True,
+            'actionlist': ['foo', 'bar', 'baz'],
+            'actionobject': {'a': 1, 'b': '2'},
+        }
+        expected_pos_args = [
+            '1',
+            '1.5',
+            'string value',
+            '1',
+            'foo,bar,baz',
+            '{"a": 1, "b": "2"}',
+            ''
+        ]
+        pos_args, _ = action_db_utils.get_args(params, ActionDBUtilsTestCase.action_db)
+        self.assertListEqual(pos_args, expected_pos_args,
+                             'Positional args not parsed / serialized correctly.')
+
+        params = {
+            'actionint': 1,
+            'actionfloat': 1.5,
+            'actionstr': 'string value',
+            'actionbool': False,
+            'actionlist': [],
+            'actionobject': {'a': 1, 'b': '2'},
+        }
+        expected_pos_args = [
+            '1',
+            '1.5',
+            'string value',
+            '0',
+            '',
+            '{"a": 1, "b": "2"}',
+            ''
+        ]
+        pos_args, _ = action_db_utils.get_args(params, ActionDBUtilsTestCase.action_db)
+        self.assertListEqual(pos_args, expected_pos_args,
+                             'Positional args not parsed / serialized correctly.')
+
+        # Test none values
+        params = {
+            'actionint': None,
+            'actionfloat': None,
+            'actionstr': None,
+            'actionbool': None,
+            'actionlist': None,
+            'actionobject': None,
+        }
+        expected_pos_args = [
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            ''
+        ]
+        pos_args, _ = action_db_utils.get_args(params, ActionDBUtilsTestCase.action_db)
+        self.assertListEqual(pos_args, expected_pos_args,
+                             'Positional args not parsed / serialized correctly.')
 
     @classmethod
     def _setup_test_models(cls):
@@ -234,8 +345,14 @@ class ActionDBUtilsTestCase(DbTestCase):
         pack = 'wolfpack'
         name = 'action-1'
         parameters = {
-            'actionstr': {'type': 'string', 'position': 1, 'required': True},
             'actionint': {'type': 'number', 'default': 10, 'position': 0},
+            'actionfloat': {'type': 'float', 'required': False, 'position': 1},
+            'actionstr': {'type': 'string', 'required': True, 'position': 2},
+            'actionbool': {'type': 'boolean', 'required': False, 'position': 3},
+            'actionlist': {'type': 'list', 'required': False, 'position': 4},
+            'actionobject': {'type': 'object', 'required': False, 'position': 5},
+            'actionnull': {'type': 'null', 'required': False, 'position': 6},
+
             'runnerdummy': {'type': 'string', 'default': 'actiondummy'}
         }
         action_db = ActionDB(pack=pack, name=name, description='awesomeness',

@@ -51,6 +51,10 @@ CONFIG_FILE_OPTIONS = {
         'cacert': {
             'type': 'string',
             'default': None
+        },
+        'silence_ssl_warnings': {
+            'type': 'bool',
+            'default': False
         }
     },
     'cli': {
@@ -61,6 +65,10 @@ CONFIG_FILE_OPTIONS = {
         'cache_token': {
             'type': 'boolean',
             'default': True
+        },
+        'timezone': {
+            'type': 'string',
+            'default': 'UTC'
         }
     },
     'credentials': {

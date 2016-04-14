@@ -11,8 +11,7 @@
       type: "array"
       items:
         type: "string"
-      default:
-        - "*"
+      required: true
     repo_url:
       type: "string"
       default: "StackStorm/st2contrib"
@@ -27,3 +26,7 @@
       type: "string"
       default: "actions,aliases,sensors"
       description: "Possible options are all, sensors, actions, rules, aliases."
+    env:
+      type: "object"
+      description: "Optional environment variables"
+      required: false

@@ -20,12 +20,13 @@ import uuid
 
 import requests
 from oslo_config import cfg
-from six.moves.urllib import parse as urlparse
 
 from st2actions.runners import ActionRunner
 from st2common import __version__ as st2_version
 from st2common import log as logging
-from st2common.constants.action import LIVEACTION_STATUS_SUCCEEDED, LIVEACTION_STATUS_FAILED
+from st2common.constants.action import LIVEACTION_STATUS_SUCCEEDED
+from st2common.constants.action import LIVEACTION_STATUS_FAILED
+from st2common.constants.action import LIVEACTION_STATUS_TIMED_OUT
 
 LOG = logging.getLogger(__name__)
 SUCCESS_STATUS_CODES = [code for code in range(200, 207)]
@@ -38,7 +39,7 @@ RUNNER_COOKIES = 'cookies'
 RUNNER_ALLOW_REDIRECTS = 'allow_redirects'
 RUNNER_HTTP_PROXY = 'http_proxy'
 RUNNER_HTTPS_PROXY = 'https_proxy'
-
+RUNNER_VERIFY_SSL_CERT = 'verify_ssl_cert'
 
 # Lookup constants for action params
 ACTION_AUTH = 'auth'
@@ -71,25 +72,31 @@ class HttpRunner(ActionRunner):
                                                           self._on_behalf_user)
         self._url = self.runner_parameters.get(RUNNER_URL, None)
         self._headers = self.runner_parameters.get(RUNNER_HEADERS, {})
-        self._headers = self._params_to_dict(self._headers)
 
         self._cookies = self.runner_parameters.get(RUNNER_COOKIES, None)
         self._allow_redirects = self.runner_parameters.get(RUNNER_ALLOW_REDIRECTS, False)
         self._http_proxy = self.runner_parameters.get(RUNNER_HTTP_PROXY, None)
         self._https_proxy = self.runner_parameters.get(RUNNER_HTTPS_PROXY, None)
+        self._verify_ssl_cert = self.runner_parameters.get(RUNNER_VERIFY_SSL_CERT, None)
 
     def run(self, action_parameters):
         client = self._get_http_client(action_parameters)
-        output = client.run()
-        status = HttpRunner._get_result_status(output.get('status_code', None))
-        return (status, output, None)
+
+        try:
+            result = client.run()
+        except requests.exceptions.Timeout as e:
+            result = {'error': str(e)}
+            status = LIVEACTION_STATUS_TIMED_OUT
+        else:
+            status = HttpRunner._get_result_status(result.get('status_code', None))
+
+        return (status, result, None)
 
     def _get_http_client(self, action_parameters):
         body = action_parameters.get(ACTION_BODY, None)
         timeout = float(action_parameters.get(ACTION_TIMEOUT, self._timeout))
         method = action_parameters.get(ACTION_METHOD, None)
         params = action_parameters.get(ACTION_QUERY_PARAMS, None)
-        params = self._params_to_dict(params)
         auth = action_parameters.get(ACTION_AUTH, {})
 
         file_name = action_parameters.get(FILE_NAME, None)
@@ -124,16 +131,7 @@ class HttpRunner(ActionRunner):
         return HTTPClient(url=self._url, method=method, body=body, params=params,
                           headers=headers, cookies=self._cookies, auth=auth,
                           timeout=timeout, allow_redirects=self._allow_redirects,
-                          proxies=proxies, files=files)
-
-    def _params_to_dict(self, params):
-        if not params:
-            return {}
-
-        if isinstance(params, dict):
-            return params
-
-        return dict(urlparse.parse_qsl(params, keep_blank_values=True, strict_parsing=True))
+                          proxies=proxies, files=files, verify=self._verify_ssl_cert)
 
     @staticmethod
     def _get_result_status(status_code):
@@ -144,7 +142,7 @@ class HttpRunner(ActionRunner):
 class HTTPClient(object):
     def __init__(self, url=None, method=None, body='', params=None, headers=None, cookies=None,
                  auth=None, timeout=60, allow_redirects=False, proxies=None,
-                 files=None):
+                 files=None, verify=False):
         if url is None:
             raise Exception('URL must be specified.')
 
@@ -171,6 +169,7 @@ class HTTPClient(object):
         self.allow_redirects = allow_redirects
         self.proxies = proxies
         self.files = files
+        self.verify = verify
 
     def run(self):
         results = {}
@@ -201,7 +200,8 @@ class HTTPClient(object):
                 timeout=self.timeout,
                 allow_redirects=self.allow_redirects,
                 proxies=self.proxies,
-                files=self.files
+                files=self.files,
+                verify=self.verify
             )
 
             headers = dict(resp.headers)

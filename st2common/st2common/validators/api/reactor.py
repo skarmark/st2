@@ -15,8 +15,11 @@
 
 import six
 
+from apscheduler.triggers.cron import CronTrigger
+
 from st2common.exceptions.apivalidation import ValueValidationException
 from st2common.constants.triggers import SYSTEM_TRIGGER_TYPES
+from st2common.constants.triggers import CRON_TIMER_TRIGGER_REF
 from st2common.util import schema as util_schema
 import st2common.operators as criteria_operators
 
@@ -25,7 +28,6 @@ __all__ = [
     'validate_trigger_parameters'
 ]
 
-VALIDATOR = util_schema.get_validator(assign_property_default=False)
 allowed_operators = criteria_operators.get_allowed_operators()
 
 
@@ -47,27 +49,37 @@ def validate_criteria(criteria):
                                            'for operator ' + operator)
 
 
-def validate_trigger_parameters(trigger_db):
+def validate_trigger_parameters(trigger_type_ref, parameters):
     """
-    This function validates parameters for system triggers (e.g. timers).
+    This function validates parameters for system triggers (e.g. webhook and timers).
 
     Note: Eventually we should also validate parameters for user defined triggers which correctly
     specify JSON schema for the parameters.
 
-    :param trigger_db: Trigger DB object.
-    :type trigger_db: :class:`TriggerDB`
-    """
-    if not trigger_db:
-        return None
+    :param trigger_type_ref: Reference of a trigger type.
+    :type trigger_type_ref: ``str``
 
-    trigger_type_ref = trigger_db.type
-    parameters = trigger_db.parameters
+    :param parameters: Trigger parameters.
+    :type parameters: ``dict``
+    """
+    if not trigger_type_ref:
+        return None
 
     if trigger_type_ref not in SYSTEM_TRIGGER_TYPES:
         # Not a system trigger, skip validation for now
         return None
 
     parameters_schema = SYSTEM_TRIGGER_TYPES[trigger_type_ref]['parameters_schema']
-    VALIDATOR(parameters_schema).validate(parameters)
+    cleaned = util_schema.validate(instance=parameters, schema=parameters_schema,
+                                   cls=util_schema.CustomValidator, use_default=True,
+                                   allow_default_none=True)
 
-    return True
+    # Additional validation for CronTimer trigger
+    # TODO: If we need to add more checks like this we should consider abstracting this out.
+    if trigger_type_ref == CRON_TIMER_TRIGGER_REF:
+        # Validate that the user provided parameters are valid. This is required since JSON schema
+        # allows arbitrary strings, but not any arbitrary string is a valid CronTrigger argument
+        # Note: Constructor throws ValueError on invalid parameters
+        CronTrigger(**parameters)
+
+    return cleaned

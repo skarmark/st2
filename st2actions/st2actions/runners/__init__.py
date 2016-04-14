@@ -20,10 +20,10 @@ import six
 
 from st2actions import handlers
 from st2common import log as logging
-from st2common.exceptions.actionrunner import ActionRunnerCreateError
-from st2common.util.api import get_full_public_api_url
-import st2common.util.action_db as action_utils
 from st2common.constants.pack import DEFAULT_PACK_NAME
+from st2common.exceptions.actionrunner import ActionRunnerCreateError
+from st2common.util import action_db as action_utils
+from st2common.util.api import get_full_public_api_url
 
 
 __all__ = [
@@ -83,6 +83,7 @@ class ActionRunner(object):
         self.context = None
         self.callback = None
         self.auth_token = None
+        self.rerun_ex_ref = None
 
     @abc.abstractmethod
     def pre_run(self):
@@ -94,10 +95,14 @@ class ActionRunner(object):
     def run(self, action_parameters):
         raise NotImplementedError()
 
+    def cancel(self):
+        pass
+
     def post_run(self, status, result):
-        if self.callback and not (set(['url', 'source']) - set(self.callback.keys())):
-            handler = handlers.get_handler(self.callback['source'])
-            handler.callback(self.callback['url'],
+        callback = self.callback or {}
+        if callback and not (set(['url', 'source']) - set(callback.keys())):
+            handler = handlers.get_handler(callback['source'])
+            handler.callback(callback['url'],
                              self.context,
                              status,
                              result)
@@ -124,7 +129,7 @@ class ActionRunner(object):
         """
         result = {}
         result['ST2_ACTION_PACK_NAME'] = self.get_pack_name()
-        result['ST2_ACTION_EXECUTION_ID'] = str(self.liveaction_id)
+        result['ST2_ACTION_EXECUTION_ID'] = str(self.execution_id)
         result['ST2_ACTION_API_URL'] = get_full_public_api_url()
 
         if self.auth_token:

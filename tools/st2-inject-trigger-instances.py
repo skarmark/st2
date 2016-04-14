@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 """
 
 Tags: Load test, stress test.
@@ -29,13 +28,13 @@ meaningful work.
 
 import os
 import random
-import sys
 
 import eventlet
 from oslo_config import cfg
 import yaml
 
 from st2common import config
+from st2common.util.monkey_patch import monkey_patch
 from st2common.util import date as date_utils
 from st2common.transport.reactor import TriggerDispatcher
 
@@ -49,15 +48,6 @@ def do_register_cli_opts(opts, ignore_errors=False):
                 raise
 
 
-def _monkey_patch():
-    eventlet.monkey_patch(
-        os=True,
-        select=True,
-        socket=True,
-        thread=False if '--use-debugger' in sys.argv else True,
-        time=True)
-
-
 def _inject_instances(trigger, rate_per_trigger, duration, payload={}):
     start = date_utils.get_datetime_utc_now()
     elapsed = 0.0
@@ -69,14 +59,14 @@ def _inject_instances(trigger, rate_per_trigger, duration, payload={}):
         dispatcher.dispatch(trigger, payload)
         delta = random.expovariate(rate_per_trigger)
         eventlet.sleep(delta)
-        elapsed = (date_utils.get_datetime_utc_now() - start).seconds/60.0
+        elapsed = (date_utils.get_datetime_utc_now() - start).seconds / 60.0
         count += 1
 
     print('%s: Emitted %d triggers in %d seconds' % (trigger, count, elapsed))
 
 
 def main():
-    _monkey_patch()
+    monkey_patch()
 
     cli_opts = [
         cfg.IntOpt('rate', default=100,
@@ -110,7 +100,7 @@ def main():
             print('Triggers=%s' % triggers)
 
     rate = cfg.CONF.rate
-    rate_per_trigger = int(rate/len(triggers))
+    rate_per_trigger = int(rate / len(triggers))
     duration = cfg.CONF.duration
 
     dispatcher_pool = eventlet.GreenPool(len(triggers))

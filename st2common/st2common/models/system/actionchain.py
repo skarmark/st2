@@ -19,8 +19,6 @@ import string
 from st2common.util import schema as util_schema
 from st2common.models.api.notification import NotificationSubSchemaAPI
 
-VALIDATOR = util_schema.get_validator(assign_property_default=False)
-
 
 class Node(object):
 
@@ -40,6 +38,12 @@ class Node(object):
                 "required": True
             },
             "params": {
+                "type": "object",
+                "description": ("Parameter for the execution (old name, here for backward "
+                                "compatibility reasons)."),
+                "default": {}
+            },
+            "parameters": {
                 "type": "object",
                 "description": "Parameter for the execution.",
                 "default": {}
@@ -88,6 +92,28 @@ class Node(object):
             prop = string.replace(prop, '-', '_')
             setattr(self, prop, value)
 
+    def validate(self):
+        params = getattr(self, 'params', {})
+        parameters = getattr(self, 'parameters', {})
+
+        if params and parameters:
+            msg = ('Either "params" or "parameters" attribute needs to be provided, but not '
+                   'both')
+            raise ValueError(msg)
+
+        return self
+
+    def get_parameters(self):
+        # Note: "params" is old deprecated attribute which will be removed in a future release
+        params = getattr(self, 'params', {})
+        parameters = getattr(self, 'parameters', {})
+
+        return parameters or params
+
+    def __repr__(self):
+        return ('<Node name=%s, ref=%s, on-success=%s, on-failure=%s>' %
+                (self.name, self.ref, self.on_success, self.on_failure))
+
 
 class ActionChain(object):
 
@@ -118,7 +144,8 @@ class ActionChain(object):
     }
 
     def __init__(self, **kw):
-        VALIDATOR(self.schema).validate(kw)
+        util_schema.validate(instance=kw, schema=self.schema, cls=util_schema.CustomValidator,
+                             use_default=False, allow_default_none=True)
 
         for prop in six.iterkeys(self.schema.get('properties', [])):
             value = kw.get(prop, None)
@@ -126,6 +153,8 @@ class ActionChain(object):
             if prop == 'chain':
                 nodes = []
                 for node in value:
-                    nodes.append(Node(**node))
+                    ac_node = Node(**node)
+                    ac_node.validate()
+                    nodes.append(ac_node)
                 value = nodes
             setattr(self, prop, value)

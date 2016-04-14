@@ -36,6 +36,9 @@ class ContentPackLoader(object):
     Class for loading pack and pack content information from directories on disk.
     """
 
+    # TODO: Rename "get_content" methods since they don't actually return
+    # content - they just return a path
+
     ALLOWED_CONTENT_TYPES = ['sensors', 'actions', 'rules', 'aliases', 'policies']
 
     def get_packs(self, base_dirs):
@@ -46,7 +49,7 @@ class ContentPackLoader(object):
                  directory.
         :rtype: ``dict``
         """
-        assert(isinstance(base_dirs, list))
+        assert isinstance(base_dirs, list)
 
         result = {}
         for base_dir in base_dirs:
@@ -73,7 +76,7 @@ class ContentPackLoader(object):
 
         :rtype: ``dict``
         """
-        assert(isinstance(base_dirs, list))
+        assert isinstance(base_dirs, list)
 
         if content_type not in self.ALLOWED_CONTENT_TYPES:
             raise ValueError('Unsupported content_type: %s' % (content_type))
@@ -186,7 +189,7 @@ class ContentPackLoader(object):
     def _get_folder(self, pack_dir, content_type):
         path = os.path.join(pack_dir, content_type)
         if not os.path.isdir(path):
-            raise ValueError('No %s found in "%s".' % (content_type, pack_dir))
+            return None
         return path
 
 

@@ -22,13 +22,16 @@ import unittest2
 from distutils.spawn import find_executable
 
 from st2tests.base import CleanFilesTestCase
-from st2debug.cmd.submit_debug_info import create_archive
-from st2debug.cmd.submit_debug_info import encrypt_archive
+from st2debug.cmd.submit_debug_info import DebugInfoCollector
 import st2debug.cmd.submit_debug_info
+from st2debug.constants import GPG_KEY
+from st2debug.constants import GPG_KEY_FINGERPRINT
+from st2debug.constants import S3_BUCKET_URL
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FIXTURES_DIR = os.path.join(BASE_DIR, 'fixtures')
 GPG_INSTALLED = find_executable('gpg') is not None
+SUBMIT_DEBUG_YAML_FILE = os.path.join(FIXTURES_DIR, 'submit-debug-info.yaml')
 
 
 @unittest2.skipIf(not GPG_INSTALLED, 'gpg binary not available')
@@ -38,19 +41,12 @@ class SubmitDebugInfoTestCase(CleanFilesTestCase):
 
         # Mock paths so we include mock data
         logs_dir = os.path.join(FIXTURES_DIR, 'logs/')
-        st2debug.cmd.submit_debug_info.ST2_LOG_FILES_PATH = logs_dir + '*.log'
-        st2debug.cmd.submit_debug_info.LOG_FILE_PATHS = [
-            st2debug.cmd.submit_debug_info.ST2_LOG_FILES_PATH
-        ]
+        st2debug.cmd.submit_debug_info.LOG_FILE_PATHS = [logs_dir + '*.log']
 
         configs_dir = os.path.join(FIXTURES_DIR, 'configs/')
         st2debug.cmd.submit_debug_info.ST2_CONFIG_FILE_PATH = os.path.join(configs_dir, 'st2.conf')
         st2debug.cmd.submit_debug_info.MISTRAL_CONFIG_FILE_PATH = os.path.join(configs_dir,
                                                                                'mistral.conf')
-        st2debug.cmd.submit_debug_info.CONFIG_FILE_PATHS = [
-            st2debug.cmd.submit_debug_info.ST2_CONFIG_FILE_PATH,
-            st2debug.cmd.submit_debug_info.MISTRAL_CONFIG_FILE_PATH
-        ]
 
         # Mock get_packs_base_paths
         content_dir = os.path.join(FIXTURES_DIR, 'content/')
@@ -58,21 +54,13 @@ class SubmitDebugInfoTestCase(CleanFilesTestCase):
         st2debug.cmd.submit_debug_info.get_packs_base_paths = mock.Mock()
         st2debug.cmd.submit_debug_info.get_packs_base_paths.return_value = return_value
 
-    def test_create_archive_include_all(self):
-        archive_path = create_archive(include_logs=True, include_configs=True,
-                                      include_content=True,
-                                      include_system_info=True)
-
+    def _verify_archive(self, archive_path, extract_path, required_directories):
         # Verify archive has been created
         self.assertTrue(os.path.isfile(archive_path))
         self.to_delete_files.append(archive_path)
 
-        extract_path = tempfile.mkdtemp()
         self.to_delete_directories.append(extract_path)
         self._extract_archive(archive_path=archive_path, extract_path=extract_path)
-
-        # Verify all the required directories have been created
-        required_directories = ['logs', 'configs', 'content']
 
         for directory_name in required_directories:
             full_path = os.path.join(extract_path, directory_name)
@@ -90,7 +78,6 @@ class SubmitDebugInfoTestCase(CleanFilesTestCase):
         # Verify configs have been copied
         st2_config_path = os.path.join(extract_path, 'configs', 'st2.conf')
         mistral_config_path = os.path.join(extract_path, 'configs', 'mistral.conf')
-
         self.assertTrue(os.path.isfile(st2_config_path))
         self.assertTrue(os.path.isfile(mistral_config_path))
 
@@ -121,11 +108,103 @@ class SubmitDebugInfoTestCase(CleanFilesTestCase):
         self.assertTrue(os.path.isdir(pack_dir))
         self.assertTrue(not os.path.exists(config_path))
 
+    def test_create_archive_include_all(self):
+        debug_collector = DebugInfoCollector(include_logs=True, include_configs=True,
+                                             include_content=True,
+                                             include_system_info=True)
+        archive_path = debug_collector.create_archive()
+        extract_path = tempfile.mkdtemp()
+        self._verify_archive(archive_path=archive_path,
+                             extract_path=extract_path,
+                             required_directories=['logs', 'configs', 'content'])
+
+    def _get_yaml_config(self):
+        return {
+            'log_file_paths': [
+                os.path.join(FIXTURES_DIR, 'logs/st2*.log')
+            ],
+            'st2_config_file_path': os.path.join(FIXTURES_DIR, 'configs/st2.conf'),
+            'mistral_config_file_path': os.path.join(FIXTURES_DIR, 'configs/mistral.conf'),
+            's3_bucket_url': S3_BUCKET_URL,
+            'gpg_key_fingerprint': GPG_KEY_FINGERPRINT,
+            'gpg_key': GPG_KEY,
+            'shell_commands': [
+                'echo foo',
+                'echo bar 1>&2'
+            ],
+            'company_name': 'MyCompany'
+        }
+
+    def test_config_option_overrides_defaults(self):
+        config = {
+            'log_file_paths': [
+                'log/path/1',
+                'log/path/1'
+            ],
+            'st2_config_file_path': 'st2/config/path',
+            'mistral_config_file_path': 'mistral/config/path',
+            's3_bucket_url': 'my_s3_url',
+            'gpg_key_fingerprint': 'my_gpg_fingerprint',
+            'gpg_key': 'my_gpg_key',
+            'shell_commands': [
+                'command 1',
+                'command 2'
+            ],
+            'company_name': 'MyCompany'
+        }
+
+        debug_collector = DebugInfoCollector(include_logs=True,
+                                             include_configs=True,
+                                             include_content=True,
+                                             include_system_info=True,
+                                             config_file=config)
+        self.assertEqual(debug_collector.log_file_paths, ['log/path/1', 'log/path/1'])
+        self.assertEqual(debug_collector.st2_config_file_path, 'st2/config/path')
+        self.assertEqual(debug_collector.st2_config_file_name, 'path')
+        self.assertEqual(debug_collector.mistral_config_file_path, 'mistral/config/path')
+        self.assertEqual(debug_collector.mistral_config_file_name, 'path')
+        self.assertEqual(debug_collector.s3_bucket_url, 'my_s3_url')
+        self.assertEqual(debug_collector.gpg_key, 'my_gpg_key')
+        self.assertEqual(debug_collector.gpg_key_fingerprint, 'my_gpg_fingerprint')
+        self.assertEqual(debug_collector.shell_commands, ['command 1', 'command 2'])
+        self.assertEqual(debug_collector.company_name, 'MyCompany')
+
+    def test_create_archive_include_all_with_config_option(self):
+        yaml_config = self._get_yaml_config()
+        debug_collector = DebugInfoCollector(include_logs=True, include_configs=True,
+                                             include_content=True,
+                                             include_system_info=True,
+                                             include_shell_commands=True,
+                                             config_file=yaml_config)
+        archive_path = debug_collector.create_archive()
+        extract_path = tempfile.mkdtemp()
+        self._verify_archive(archive_path=archive_path,
+                             extract_path=extract_path,
+                             required_directories=['logs', 'configs', 'content', 'commands'])
+
+        # Verify commands output have been copied
+        commands_path = os.path.join(extract_path, 'commands')
+        command_files = os.listdir(commands_path)
+        self.assertTrue(len(command_files), 2)
+
+        # Verify command output file names
+        self.assertTrue('echofoo.txt' in command_files)
+        self.assertTrue('echobar12.txt' in command_files)
+
+        # Verify file contents
+        with open(os.path.join(commands_path, 'echofoo.txt')) as f:
+            expected_content = '[BEGIN STDOUT]\nfoo\n[END STDOUT]\n[BEGIN STDERR]\n[END STDERR]'
+            self.assertEqual(expected_content, f.read())
+
+        with open(os.path.join(commands_path, 'echobar12.txt')) as f:
+            expected_content = '[BEGIN STDOUT]\n[END STDOUT]\n[BEGIN STDERR]\nbar\n[END STDERR]'
+            self.assertEqual(expected_content, f.read())
+
     def test_create_archive_exclusion(self):
         # Verify only system info file is included
-        archive_path = create_archive(include_logs=False, include_configs=False,
-                                      include_content=False,
-                                      include_system_info=True)
+        debug_collector = DebugInfoCollector(include_logs=False, include_configs=False,
+                                             include_content=False, include_system_info=True)
+        archive_path = debug_collector.create_archive()
 
         # Verify archive has been created
         self.assertTrue(os.path.isfile(archive_path))
@@ -147,12 +226,35 @@ class SubmitDebugInfoTestCase(CleanFilesTestCase):
         self.assertTrue(os.path.isfile(full_path))
 
     def test_encrypt_archive(self):
-        plaintext_archive_path = create_archive(include_logs=True, include_configs=True,
-                                                include_content=True,
-                                                include_system_info=True)
+        debug_collector = DebugInfoCollector(include_logs=True, include_configs=True,
+                                             include_content=True,
+                                             include_system_info=True)
+        plaintext_archive_path = debug_collector.create_archive()
         plaintext_archive_size = os.stat(plaintext_archive_path).st_size
 
-        encrypted_archive_path = encrypt_archive(archive_file_path=plaintext_archive_path)
+        encrypted_archive_path = debug_collector.encrypt_archive(
+            archive_file_path=plaintext_archive_path)
+        encrypt_archive_size = os.stat(encrypted_archive_path).st_size
+
+        self.assertTrue(os.path.isfile(encrypted_archive_path))
+        self.assertTrue(encrypt_archive_size > plaintext_archive_size)
+
+        self.assertRaises(Exception, archive_path=encrypted_archive_path,
+                          extract_path='/tmp')
+
+    def test_encrypt_archive_with_custom_gpg_key(self):
+        yaml_config = self._get_yaml_config()
+        debug_collector = DebugInfoCollector(include_logs=True, include_configs=True,
+                                             include_content=True,
+                                             include_system_info=True,
+                                             include_shell_commands=True,
+                                             config_file=yaml_config)
+        plaintext_archive_path = debug_collector.create_archive()
+
+        plaintext_archive_size = os.stat(plaintext_archive_path).st_size
+
+        encrypted_archive_path = debug_collector.encrypt_archive(
+            archive_file_path=plaintext_archive_path)
         encrypt_archive_size = os.stat(encrypted_archive_path).st_size
 
         self.assertTrue(os.path.isfile(encrypted_archive_path))

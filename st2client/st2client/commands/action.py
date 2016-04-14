@@ -19,6 +19,7 @@ import copy
 import json
 import logging
 import textwrap
+import calendar
 import time
 import six
 import sys
@@ -32,15 +33,31 @@ from st2client.exceptions.operations import OperationFailureException
 from st2client.formatters import table
 from st2client.formatters import execution as execution_formatter
 from st2client.utils import jsutil
-from st2client.utils.date import format_isodate
+from st2client.utils.date import format_isodate_for_user_timezone
+from st2client.utils.date import parse as parse_isotime
 from st2client.utils.color import format_status
 
 LOG = logging.getLogger(__name__)
 
 LIVEACTION_STATUS_REQUESTED = 'requested'
 LIVEACTION_STATUS_SCHEDULED = 'scheduled'
+LIVEACTION_STATUS_DELAYED = 'delayed'
 LIVEACTION_STATUS_RUNNING = 'running'
+LIVEACTION_STATUS_SUCCEEDED = 'succeeded'
+LIVEACTION_STATUS_FAILED = 'failed'
+LIVEACTION_STATUS_TIMED_OUT = 'timeout'
+LIVEACTION_STATUS_ABANDONED = 'abandoned'
+LIVEACTION_STATUS_CANCELING = 'canceling'
 LIVEACTION_STATUS_CANCELED = 'canceled'
+
+
+LIVEACTION_COMPLETED_STATES = [
+    LIVEACTION_STATUS_SUCCEEDED,
+    LIVEACTION_STATUS_FAILED,
+    LIVEACTION_STATUS_TIMED_OUT,
+    LIVEACTION_STATUS_CANCELED,
+    LIVEACTION_STATUS_ABANDONED
+]
 
 # Who parameters should be masked when displaying action execution output
 PARAMETERS_TO_MASK = [
@@ -118,6 +135,43 @@ def format_wf_instances(instances):
     return instances
 
 
+def format_execution_statuses(instances):
+    result = []
+    for instance in instances:
+        instance = format_execution_status(instance)
+        result.append(instance)
+
+    return result
+
+
+def format_execution_status(instance):
+    """
+    Augment instance "status" attribute with number of seconds which have elapsed for all the
+    executions which are in running state and execution total run time for all the executions
+    which have finished.
+    """
+    start_timestamp = getattr(instance, 'start_timestamp', None)
+    end_timestamp = getattr(instance, 'end_timestamp', None)
+
+    if instance.status == LIVEACTION_STATUS_RUNNING and start_timestamp:
+        start_timestamp = instance.start_timestamp
+        start_timestamp = parse_isotime(start_timestamp)
+        start_timestamp = calendar.timegm(start_timestamp.timetuple())
+        now = int(time.time())
+        elapsed_seconds = (now - start_timestamp)
+        instance.status = '%s (%ss elapsed)' % (instance.status, elapsed_seconds)
+    elif instance.status in LIVEACTION_COMPLETED_STATES and start_timestamp and end_timestamp:
+        start_timestamp = parse_isotime(start_timestamp)
+        start_timestamp = calendar.timegm(start_timestamp.timetuple())
+        end_timestamp = parse_isotime(end_timestamp)
+        end_timestamp = calendar.timegm(end_timestamp.timetuple())
+
+        elapsed_seconds = (end_timestamp - start_timestamp)
+        instance.status = '%s (%ss elapsed)' % (instance.status, elapsed_seconds)
+
+    return instance
+
+
 class ActionBranch(resource.ResourceBranch):
 
     def __init__(self, description, app, subparsers, parent_parser=None):
@@ -132,24 +186,40 @@ class ActionBranch(resource.ResourceBranch):
             })
 
         # Registers extended commands
+        self.commands['enable'] = ActionEnableCommand(self.resource, self.app, self.subparsers)
+        self.commands['disable'] = ActionDisableCommand(self.resource, self.app, self.subparsers)
         self.commands['execute'] = ActionRunCommand(
             self.resource, self.app, self.subparsers,
             add_help=False)
 
 
 class ActionListCommand(resource.ContentPackResourceListCommand):
-    display_attributes = ['ref', 'pack', 'name', 'description']
+    display_attributes = ['ref', 'pack', 'description']
 
 
 class ActionGetCommand(resource.ContentPackResourceGetCommand):
     display_attributes = ['all']
-    attribute_display_order = ['id', 'ref', 'pack', 'name', 'description',
+    attribute_display_order = ['id', 'uid', 'ref', 'pack', 'name', 'description',
                                'enabled', 'entry_point', 'runner_type',
                                'parameters']
 
 
 class ActionUpdateCommand(resource.ContentPackResourceUpdateCommand):
     pass
+
+
+class ActionEnableCommand(resource.ContentPackResourceEnableCommand):
+    display_attributes = ['all']
+    attribute_display_order = ['id', 'ref', 'pack', 'name', 'description',
+                               'enabled', 'entry_point', 'runner_type',
+                               'parameters']
+
+
+class ActionDisableCommand(resource.ContentPackResourceDisableCommand):
+    display_attributes = ['all']
+    attribute_display_order = ['id', 'ref', 'pack', 'name', 'description',
+                               'enabled', 'entry_point', 'runner_type',
+                               'parameters']
 
 
 class ActionDeleteCommand(resource.ContentPackResourceDeleteCommand):
@@ -165,8 +235,8 @@ class ActionRunCommandMixin(object):
     attribute_display_order = ['id', 'action.ref', 'context.user', 'parameters', 'status',
                                'start_timestamp', 'end_timestamp', 'result']
     attribute_transform_functions = {
-        'start_timestamp': format_isodate,
-        'end_timestamp': format_isodate,
+        'start_timestamp': format_isodate_for_user_timezone,
+        'end_timestamp': format_isodate_for_user_timezone,
         'parameters': format_parameters,
         'status': format_status
     }
@@ -186,7 +256,11 @@ class ActionRunCommandMixin(object):
             self.print_output('To get the results, execute:\n st2 execution get %s' %
                               (execution.id), six.text_type)
         else:
-            return self._print_execution_details(execution=execution, args=args, **kwargs)
+            self._print_execution_details(execution=execution, args=args, **kwargs)
+
+        if execution.status == 'failed':
+            # Exit with non zero if the action has failed
+            sys.exit(1)
 
     def _add_common_options(self):
         root_arg_grp = self.parser.add_mutually_exclusive_group()
@@ -195,7 +269,7 @@ class ActionRunCommandMixin(object):
         task_list_arg_grp = root_arg_grp.add_argument_group()
         task_list_arg_grp.add_argument('--raw', action='store_true',
                                        help='Raw output, don\'t shot sub-tasks for workflows.')
-        task_list_arg_grp.add_argument('--tasks', action='store_true',
+        task_list_arg_grp.add_argument('--show-tasks', action='store_true',
                                        help='Whether to show sub-tasks of an execution.')
         task_list_arg_grp.add_argument('--depth', type=int, default=-1,
                                        help='Depth to which to show sub-tasks. \
@@ -207,7 +281,7 @@ class ActionRunCommandMixin(object):
 
         detail_arg_grp = execution_details_arg_grp.add_mutually_exclusive_group()
         detail_arg_grp.add_argument('--attr', nargs='+',
-                                    default=['id', 'status', 'result'],
+                                    default=['id', 'status', 'parameters', 'result'],
                                     help=('List of attributes to include in the '
                                           'output. "all" or unspecified will '
                                           'return all attributes.'))
@@ -232,16 +306,16 @@ class ActionRunCommandMixin(object):
         runner_type = execution.action.get('runner_type', 'unknown')
         is_workflow_action = runner_type in WORKFLOW_RUNNER_TYPES
 
-        tasks = getattr(args, 'tasks', False)
+        show_tasks = getattr(args, 'show_tasks', False)
         raw = getattr(args, 'raw', False)
         detail = getattr(args, 'detail', False)
         key = getattr(args, 'key', None)
         attr = getattr(args, 'attr', [])
 
-        if tasks and not is_workflow_action:
-            raise ValueError('--tasks option can only be used with workflow actions')
+        if show_tasks and not is_workflow_action:
+            raise ValueError('--show-tasks option can only be used with workflow actions')
 
-        if not raw and not detail and (tasks or is_workflow_action):
+        if not raw and not detail and (show_tasks or is_workflow_action):
             self._run_and_print_child_task_list(execution=execution, args=args, **kwargs)
         else:
             instance = execution
@@ -266,7 +340,7 @@ class ActionRunCommandMixin(object):
         action_exec_mgr = self.app.client.managers['LiveAction']
 
         instance = execution
-        options = {'attributes': ['id', 'action.ref', 'status', 'start_timestamp',
+        options = {'attributes': ['id', 'action.ref', 'parameters', 'status', 'start_timestamp',
                                   'end_timestamp']}
         options['json'] = args.json
         options['attribute_transform_functions'] = self.attribute_transform_functions
@@ -275,6 +349,7 @@ class ActionRunCommandMixin(object):
         kwargs['depth'] = args.depth
         child_instances = action_exec_mgr.get_property(execution.id, 'children', **kwargs)
         child_instances = self._format_child_instances(child_instances, execution.id)
+        child_instances = format_execution_statuses(child_instances)
 
         if not child_instances:
             # No child error, there might be a global error, include result in the output
@@ -299,12 +374,14 @@ class ActionRunCommandMixin(object):
                 # Top-level error
                 instance.error = top_level_error
                 instance.traceback = top_level_traceback
+                instance.result = 'See error and traceback.'
                 options['attributes'].insert(status_index + 1, 'error')
                 options['attributes'].insert(status_index + 2, 'traceback')
             elif task_error:
                 # Task error
                 instance.error = task_error
                 instance.traceback = task_traceback
+                instance.result = 'See error and traceback.'
                 instance.failed_on = tasks[-1].get('name', 'unknown')
                 options['attributes'].insert(status_index + 1, 'error')
                 options['attributes'].insert(status_index + 2, 'traceback')
@@ -324,7 +401,8 @@ class ActionRunCommandMixin(object):
         pending_statuses = [
             LIVEACTION_STATUS_REQUESTED,
             LIVEACTION_STATUS_SCHEDULED,
-            LIVEACTION_STATUS_RUNNING
+            LIVEACTION_STATUS_RUNNING,
+            LIVEACTION_STATUS_CANCELING
         ]
 
         if not args.async:
@@ -337,11 +415,8 @@ class ActionRunCommandMixin(object):
 
             sys.stdout.write('\n')
 
-            if execution.status == 'LIVEACTION_STATUS_CANCELED':
+            if execution.status == LIVEACTION_STATUS_CANCELED:
                 return execution
-
-            if self._is_error_result(result=execution.result):
-                execution.result = self._format_error_result(execution.result)
 
         return execution
 
@@ -382,22 +457,6 @@ class ActionRunCommandMixin(object):
             traceback = None
 
         return error, traceback
-
-    def _is_error_result(self, result):
-        if not isinstance(result, dict):
-            return False
-
-        if 'message' not in result:
-            return False
-
-        if 'traceback' not in result:
-            return False
-
-        return True
-
-    def _format_error_result(self, result):
-        result = 'Message: %s\nTraceback: %s' % (result['message'], result['traceback'])
-        return result
 
     def _get_action_parameters_from_args(self, action, runner, args):
         """
@@ -464,6 +523,10 @@ class ActionRunCommandMixin(object):
             return value
 
         result = {}
+
+        if not args.parameters:
+            return result
+
         for idx in range(len(args.parameters)):
             arg = args.parameters[idx]
             if '=' in arg:
@@ -672,7 +735,8 @@ class ActionRunCommandMixin(object):
             'status': task.status,
             'task': jsutil.get_value(vars(task), task_name_key),
             'action': task.action.get('ref', None),
-            'start_timestamp': task.start_timestamp
+            'start_timestamp': task.start_timestamp,
+            'end_timestamp': getattr(task, 'end_timestamp', None)
         })
 
     def _sort_parameters(self, parameters, names):
@@ -740,6 +804,12 @@ class ActionRunCommand(ActionRunCommandMixin, resource.ResourceCommand):
         self._add_common_options()
 
         if self.name in ['run', 'execute']:
+            self.parser.add_argument('--trace-tag', '--trace_tag',
+                                     help='A trace tag string to track execution later.',
+                                     dest='trace_tag', required=False)
+            self.parser.add_argument('--trace-id',
+                                     help='Existing trace id for this execution.',
+                                     dest='trace_id', required=False)
             self.parser.add_argument('-a', '--async',
                                      action='store_true', dest='async',
                                      help='Do not wait for action to finish.')
@@ -779,6 +849,12 @@ class ActionRunCommand(ActionRunCommandMixin, resource.ResourceCommand):
         execution.action = action_ref
         execution.parameters = action_parameters
 
+        if not args.trace_id and args.trace_tag:
+            execution.context = {'trace_context': {'trace_tag': args.trace_tag}}
+
+        if args.trace_id:
+            execution.context = {'trace_context': {'id_': args.trace_id}}
+
         action_exec_mgr = self.app.client.managers['LiveAction']
 
         execution = action_exec_mgr.create(execution, **kwargs)
@@ -807,12 +883,31 @@ class ActionExecutionBranch(resource.ResourceBranch):
 POSSIBLE_ACTION_STATUS_VALUES = ('succeeded', 'running', 'scheduled', 'failed', 'canceled')
 
 
-class ActionExecutionListCommand(resource.ResourceCommand):
+class ActionExecutionReadCommand(resource.ResourceCommand):
+    """
+    Base class for read / view commands (list and get).
+    """
+
+    def _get_exclude_attributes(self, args):
+        """
+        Retrieve a list of exclude attributes for particular command line arguments.
+        """
+        exclude_attributes = []
+
+        if 'result' not in args.attr:
+            exclude_attributes.append('result')
+        if 'trigger_instance' not in args.attr:
+            exclude_attributes.append('trigger_instance')
+
+        return exclude_attributes
+
+
+class ActionExecutionListCommand(ActionExecutionReadCommand):
     display_attributes = ['id', 'action.ref', 'context.user', 'status', 'start_timestamp',
                           'end_timestamp']
     attribute_transform_functions = {
-        'start_timestamp': format_isodate,
-        'end_timestamp': format_isodate,
+        'start_timestamp': format_isodate_for_user_timezone,
+        'end_timestamp': format_isodate_for_user_timezone,
         'parameters': format_parameters,
         'status': format_status
     }
@@ -878,17 +973,28 @@ class ActionExecutionListCommand(resource.ResourceCommand):
         if args.timestamp_lt:
             kwargs['timestamp_lt'] = args.timestamp_lt
 
+        # We exclude "result" and "trigger_instance" attributes which can contain a lot of data
+        # since they are not displayed nor used which speeds the common operation substantially.
+        exclude_attributes = self._get_exclude_attributes(args=args)
+        exclude_attributes = ','.join(exclude_attributes)
+        kwargs['exclude_attributes'] = exclude_attributes
+
         return self.manager.query(limit=args.last, **kwargs)
 
     def run_and_print(self, args, **kwargs):
         instances = format_wf_instances(self.run(args, **kwargs))
+
+        if not args.json:
+            # Include elapsed time for running executions
+            instances = format_execution_statuses(instances)
+
         self.print_output(reversed(instances), table.MultiColumnTable,
                           attributes=args.attr, widths=args.width,
                           json=args.json,
                           attribute_transform_functions=self.attribute_transform_functions)
 
 
-class ActionExecutionGetCommand(ActionRunCommandMixin, resource.ResourceCommand):
+class ActionExecutionGetCommand(ActionRunCommandMixin, ActionExecutionReadCommand):
     display_attributes = ['id', 'action.ref', 'context.user', 'parameters', 'status',
                           'start_timestamp', 'end_timestamp', 'result', 'liveaction']
 
@@ -906,6 +1012,13 @@ class ActionExecutionGetCommand(ActionRunCommandMixin, resource.ResourceCommand)
 
     @add_auth_token_to_kwargs_from_cli
     def run(self, args, **kwargs):
+        # We exclude "result" and / or "trigger_instance" attribute if it's not explicitly
+        # requested by user either via "--attr" flag or by default.
+        exclude_attributes = self._get_exclude_attributes(args=args)
+        exclude_attributes = ','.join(exclude_attributes)
+
+        kwargs['params'] = {'exclude_attributes': exclude_attributes}
+
         execution = self.get_resource_by_id(id=args.id, **kwargs)
         return execution
 
@@ -913,10 +1026,13 @@ class ActionExecutionGetCommand(ActionRunCommandMixin, resource.ResourceCommand)
     def run_and_print(self, args, **kwargs):
         try:
             execution = self.run(args, **kwargs)
+
+            if not args.json:
+                # Include elapsed time for running executions
+                execution = format_execution_status(execution)
         except resource.ResourceNotFoundError:
             self.print_not_found(args.id)
             raise OperationFailureException('Execution %s not found.' % (args.id))
-
         return self._print_execution_details(execution=execution, args=args, **kwargs)
 
 
@@ -939,7 +1055,7 @@ class ActionExecutionCancelCommand(resource.ResourceCommand):
     def run_and_print(self, args, **kwargs):
         response = self.run(args, **kwargs)
         if response and 'faultstring' in response:
-            message = response.get('faultstring', '%s with id %s canceled.' %
+            message = response.get('faultstring', 'Cancellation requested for %s with id %s.' %
                                    (self.resource.get_display_name().lower(), args.id))
 
         elif response:
@@ -965,6 +1081,13 @@ class ActionExecutionReRunCommand(ActionRunCommandMixin, resource.ResourceComman
         self.parser.add_argument('parameters', nargs='*',
                                  help='List of keyword args, positional args, '
                                       'and optional args for the action.')
+        self.parser.add_argument('--tasks', nargs='*',
+                                 help='Name of the workflow tasks to re-run.')
+        self.parser.add_argument('--no-reset', dest='no_reset', nargs='*',
+                                 help='Name of the with-items tasks to not reset. This only '
+                                      'applies to Mistral workflows. By default, all iterations '
+                                      'for with-items tasks is rerun. If no reset, only failed '
+                                      ' iterations are rerun.')
         self.parser.add_argument('-a', '--async',
                                  action='store_true', dest='async',
                                  help='Do not wait for action to finish.')
@@ -999,9 +1122,14 @@ class ActionExecutionReRunCommand(ActionRunCommandMixin, resource.ResourceComman
         action_parameters = self._get_action_parameters_from_args(action=action, runner=runner,
                                                                   args=args)
 
-        execution = action_exec_mgr.re_run(execution_id=args.id, parameters=action_parameters,
+        execution = action_exec_mgr.re_run(execution_id=args.id,
+                                           parameters=action_parameters,
+                                           tasks=args.tasks,
+                                           no_reset=args.no_reset,
                                            **kwargs)
+
         execution = self._get_execution_result(execution=execution,
                                                action_exec_mgr=action_exec_mgr,
                                                args=args, **kwargs)
+
         return execution

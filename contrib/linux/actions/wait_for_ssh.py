@@ -1,25 +1,37 @@
 #!/usr/bin/env python
 
-import paramiko
-import argparse
+import time
+
+from oslo_config import cfg
+
 from st2actions.runners.pythonrunner import Action
-import os, yaml, json, time
+from st2actions.runners.ssh.paramiko_ssh import ParamikoSSHClient
+
 
 class BaseAction(Action):
+    def run(self, hostname, port, username, password=None, keyfile=None, ssh_timeout=5,
+            sleep_delay=20, retries=10):
+        # Note: If neither password nor key file is provided, we try to use system user
+        # key file
+        if not password and not keyfile:
+            keyfile = cfg.CONF.system_user.ssh_key_file
+            self.logger.info('Neither "password" nor "keyfile" parameter provided, '
+                             'defaulting to using "%s" key file' % (keyfile))
 
-    def run(self, keyfile, username, hostname, ssh_timeout, retries):
- 
-        key = paramiko.RSAKey.from_private_key_file(keyfile)
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client = ParamikoSSHClient(hostname=hostname, port=port, username=username,
+                                   password=password, key_files=keyfile,
+                                   timeout=ssh_timeout)
 
-        for x in range(retries):
+        for index in range(retries):
+            attempt = index + 1
+
             try:
-                client.connect(hostname=hostname, username=username, pkey=key)
+                self.logger.debug('SSH connection attempt: %s' % (attempt))
+                client.connect()
                 return True
-            except Exception, e: 
-                self.logger.info(e)
-                time.sleep(ssh_timeout)
-            time.sleep(20)
-        self.logger.info("Exceeded max retries")
-        return False
+            except Exception as e:
+                self.logger.info('Attempt %s failed (%s), sleeping for %s seconds...' %
+                                 (attempt, str(e), sleep_delay))
+                time.sleep(sleep_delay)
+
+        raise Exception('Exceeded max retries (%s)' % (retries))

@@ -1,6 +1,6 @@
 ---
     name: 'cp'
-    runner_type: 'run-remote'
+    runner_type: 'remote-shell-cmd'
     description: 'Copy file(s)'
     enabled: true
     entry_point: ''
@@ -24,7 +24,6 @@
         cmd:
             immutable: true
             default: 'cp {{args}} {{source}} {{destination}}'
-            position: 0
         args:
             description: 'Command line arguments passed to cp'
             default: '-v{% if recursive == true %} -r{% endif %}{% if force == true %} -f{% endif %}'

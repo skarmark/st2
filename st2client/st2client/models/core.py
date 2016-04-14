@@ -167,6 +167,7 @@ class ResourceManager(object):
         limit = kwargs.pop('limit', None)
         pack = kwargs.pop('pack', None)
         prefix = kwargs.pop('prefix', None)
+        user = kwargs.pop('user', None)
 
         params = {}
         if limit and limit <= 0:
@@ -179,6 +180,9 @@ class ResourceManager(object):
 
         if prefix:
             params['prefix'] = prefix
+
+        if user:
+            params['user'] = user
 
         response = self.client.get(url=url, params=params, **kwargs)
         if response.status_code != 200:
@@ -316,12 +320,20 @@ class ActionAliasResourceManager(ResourceManager):
 
 class LiveActionResourceManager(ResourceManager):
     @add_auth_token_to_kwargs_from_env
-    def re_run(self, execution_id, parameters=None, **kwargs):
+    def re_run(self, execution_id, parameters=None, tasks=None, no_reset=None, **kwargs):
         url = '/%s/%s/re_run' % (self.resource.get_url_path_name(), execution_id)
 
-        data = {}
-        if parameters:
-            data['parameters'] = parameters
+        tasks = tasks or []
+        no_reset = no_reset or []
+
+        if list(set(no_reset) - set(tasks)):
+            raise ValueError('List of tasks to reset does not match the tasks to rerun.')
+
+        data = {
+            'parameters': parameters,
+            'tasks': tasks,
+            'reset': list(set(tasks) - set(no_reset))
+        }
 
         response = self.client.post(url, data, **kwargs)
         if response.status_code != 200:
@@ -333,7 +345,7 @@ class LiveActionResourceManager(ResourceManager):
 
 class TriggerInstanceResourceManager(ResourceManager):
     @add_auth_token_to_kwargs_from_env
-    def re_emit(self, trigger_instance_id):
+    def re_emit(self, trigger_instance_id, **kwargs):
         url = '/%s/%s/re_emit' % (self.resource.get_url_path_name(), trigger_instance_id)
         response = self.client.post(url, None)
         if response.status_code != 200:

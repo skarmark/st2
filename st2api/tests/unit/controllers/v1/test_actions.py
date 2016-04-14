@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import os.path
 import copy
+
 try:
     import simplejson as json
 except ImportError:
@@ -25,6 +28,9 @@ import unittest2
 from st2common.persistence.action import Action
 import st2common.validators.api.action as action_validator
 from st2common.constants.pack import SYSTEM_PACK_NAME
+from st2common.persistence.pack import Pack
+from st2tests.fixturesloader import get_fixtures_base_path
+from st2tests.base import CleanFilesTestCase
 
 from tests import FunctionalTest
 
@@ -184,8 +190,92 @@ ACTION_11 = {
     }
 }
 
+# Good action inside dummy pack
+ACTION_12 = {
+    'name': 'st2.dummy.action1',
+    'description': 'test description',
+    'enabled': True,
+    'pack': 'dummy_pack_1',
+    'entry_point': '/tmp/test/action1.sh',
+    'runner_type': 'local-shell-script',
+    'parameters': {
+        'a': {'type': 'string', 'default': 'A1'},
+        'b': {'type': 'string', 'default': 'B1'}
+    },
+    'tags': [
+        {'name': 'tag1', 'value': 'dont-care'},
+        {'name': 'tag2', 'value': 'dont-care'}
+    ]
+}
 
-class TestActionController(FunctionalTest):
+# Action with invalid parameter type attribute
+ACTION_13 = {
+    'name': 'st2.dummy.action2',
+    'description': 'test description',
+    'enabled': True,
+    'pack': 'dummy_pack_1',
+    'entry_point': '/tmp/test/action1.sh',
+    'runner_type': 'local-shell-script',
+    'parameters': {
+        'a': {'type': ['string', 'object'], 'default': 'A1'},
+        'b': {'type': 'string', 'default': 'B1'}
+    }
+}
+
+ACTION_14 = {
+    'name': 'st2.dummy.action14',
+    'description': 'test description',
+    'enabled': True,
+    'pack': 'dummy_pack_1',
+    'entry_point': '/tmp/test/action1.sh',
+    'runner_type': 'local-shell-script',
+    'parameters': {
+        'a': {'type': 'string', 'default': 'A1'},
+        'b': {'type': 'string', 'default': 'B1'},
+        'sudo': {'type': 'string'}
+    }
+}
+
+ACTION_15 = {
+    'name': 'st2.dummy.action15',
+    'description': 'test description',
+    'enabled': True,
+    'pack': 'dummy_pack_1',
+    'entry_point': '/tmp/test/action1.sh',
+    'runner_type': 'local-shell-script',
+    'parameters': {
+        'a': {'type': 'string', 'default': 'A1'},
+        'b': {'type': 'string', 'default': 'B1'},
+        'sudo': {'default': True, 'immutable': True}
+    }
+}
+
+ACTION_WITH_NOTIFY = {
+    'name': 'st2.dummy.action_notify_test',
+    'description': 'test description',
+    'enabled': True,
+    'pack': 'dummy_pack_1',
+    'entry_point': '/tmp/test/action1.sh',
+    'runner_type': 'local-shell-script',
+    'parameters': {
+        'a': {'type': 'string', 'default': 'A1'},
+        'b': {'type': 'string', 'default': 'B1'},
+        'sudo': {'default': True, 'immutable': True}
+    },
+    'notify': {
+        'on-complete': {
+            'message': 'Woohoo! I completed!!!'
+        }
+    }
+}
+
+
+class TestActionController(FunctionalTest, CleanFilesTestCase):
+    register_packs = True
+    to_delete_files = [
+        os.path.join(get_fixtures_base_path(), 'dummy_pack_1/actions/filea.txt')
+    ]
+
     @mock.patch.object(action_validator, 'validate_action', mock.MagicMock(
         return_value=True))
     def test_get_one_using_id(self):
@@ -298,6 +388,15 @@ class TestActionController(FunctionalTest):
 
     @mock.patch.object(action_validator, 'validate_action', mock.MagicMock(
         return_value=True))
+    def test_post_parameter_type_is_array_and_invalid(self):
+        post_resp = self.__do_post(ACTION_13, expect_errors=True)
+        self.assertEqual(post_resp.status_int, 400)
+
+        expected_error = '[u\'string\', u\'object\'] is not valid under any of the given schemas'
+        self.assertTrue(expected_error in post_resp.body)
+
+    @mock.patch.object(action_validator, 'validate_action', mock.MagicMock(
+        return_value=True))
     def test_post_discard_id_field(self):
         post_resp = self.__do_post(ACTION_7)
         self.assertEqual(post_resp.status_int, 201)
@@ -333,6 +432,31 @@ class TestActionController(FunctionalTest):
 
     @mock.patch.object(action_validator, 'validate_action', mock.MagicMock(
         return_value=True))
+    def test_post_include_files(self):
+        # Verify initial state
+        pack_db = Pack.get_by_ref(ACTION_12['pack'])
+        self.assertTrue('actions/filea.txt' not in pack_db.files)
+
+        action = copy.deepcopy(ACTION_12)
+        action['data_files'] = [
+            {
+                'file_path': 'filea.txt',
+                'content': 'test content'
+            }
+        ]
+        post_resp = self.__do_post(action)
+
+        # Verify file has been written on disk
+        for file_path in self.to_delete_files:
+            self.assertTrue(os.path.exists(file_path))
+
+        # Verify PackDB.files has been updated
+        pack_db = Pack.get_by_ref(ACTION_12['pack'])
+        self.assertTrue('actions/filea.txt' in pack_db.files)
+        self.__do_delete(self.__get_action_id(post_resp))
+
+    @mock.patch.object(action_validator, 'validate_action', mock.MagicMock(
+        return_value=True))
     def test_post_put_delete(self):
         action = copy.copy(ACTION_1)
         post_resp = self.__do_post(action)
@@ -356,6 +480,17 @@ class TestActionController(FunctionalTest):
         post_resp = self.__do_post(ACTION_5, expect_errors=True)
         self.assertEqual(post_resp.status_int, 400)
 
+    def test_post_override_runner_param_not_allowed(self):
+        post_resp = self.__do_post(ACTION_14, expect_errors=True)
+        self.assertEqual(post_resp.status_int, 400)
+        expected = ('The attribute "type" for the runner parameter "sudo" '
+                    'in action "dummy_pack_1.st2.dummy.action14" cannot be overridden.')
+        self.assertEqual(post_resp.json.get('faultstring'), expected)
+
+    def test_post_override_runner_param_allowed(self):
+        post_resp = self.__do_post(ACTION_15)
+        self.assertEqual(post_resp.status_int, 201)
+
     @mock.patch.object(action_validator, 'validate_action', mock.MagicMock(
         return_value=True))
     def test_delete(self):
@@ -372,6 +507,24 @@ class TestActionController(FunctionalTest):
         self.assertEqual(get_resp.status_int, 200)
         self.assertEqual(self.__get_action_id(get_resp), action_id)
         self.assertEqual(get_resp.json['tags'], ACTION_1['tags'])
+        self.__do_delete(action_id)
+
+    @mock.patch.object(action_validator, 'validate_action', mock.MagicMock(
+        return_value=True))
+    def test_action_with_notify_update(self):
+        post_resp = self.__do_post(ACTION_WITH_NOTIFY)
+        action_id = self.__get_action_id(post_resp)
+        get_resp = self.__do_get_one(action_id)
+        self.assertEqual(get_resp.status_int, 200)
+        self.assertEqual(self.__get_action_id(get_resp), action_id)
+        self.assertTrue(get_resp.json['notify']['on-complete'] is not None)
+        # Now post the same action with no notify
+        ACTION_WITHOUT_NOTIFY = copy.copy(ACTION_WITH_NOTIFY)
+        del ACTION_WITHOUT_NOTIFY['notify']
+        self.__do_put(action_id, ACTION_WITHOUT_NOTIFY)
+        # Validate that notify section has vanished
+        get_resp = self.__do_get_one(action_id)
+        self.assertEqual(get_resp.json['notify'], {})
         self.__do_delete(action_id)
 
     # TODO: Re-enable those tests after we ensure DB is flushed in setUp

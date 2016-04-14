@@ -18,7 +18,7 @@ from jsonpath_rw import parse
 
 from st2common import log as logging
 import st2common.operators as criteria_operators
-from st2common.constants.rules import TRIGGER_PAYLOAD_PREFIX
+from st2common.constants.rules import TRIGGER_PAYLOAD_PREFIX, RULE_TYPE_BACKSTOP
 from st2common.constants.system import SYSTEM_KV_PREFIX
 from st2common.services.keyvalues import KeyValueLookup
 from st2common.util.templating import render_template_with_system_context
@@ -28,7 +28,7 @@ LOG = logging.getLogger('st2reactor.ruleenforcement.filter')
 
 
 class RuleFilter(object):
-    def __init__(self, trigger_instance, trigger, rule):
+    def __init__(self, trigger_instance, trigger, rule, extra_info=False):
         """
         :param trigger_instance: TriggerInstance DB object.
         :type trigger_instance: :class:`TriggerInstanceDB``
@@ -42,6 +42,7 @@ class RuleFilter(object):
         self.trigger_instance = trigger_instance
         self.trigger = trigger
         self.rule = rule
+        self.extra_info = extra_info
 
         # Base context used with a logger
         self._base_logger_context = {
@@ -56,10 +57,12 @@ class RuleFilter(object):
 
         :rtype: ``bool``
         """
-        LOG.info('Validating rule %s for %s.', self.rule.id, self.trigger['name'],
+        LOG.info('Validating rule %s for %s.', self.rule.ref, self.trigger['name'],
                  extra=self._base_logger_context)
 
         if not self.rule.enabled:
+            if self.extra_info:
+                LOG.info('Validation failed for rule %s as it is disabled.', self.rule.ref)
             return False
 
         criteria = self.rule.criteria
@@ -75,8 +78,19 @@ class RuleFilter(object):
 
         for criterion_k in criteria.keys():
             criterion_v = criteria[criterion_k]
-            is_rule_applicable = self._check_criterion(criterion_k, criterion_v, payload_lookup)
+            is_rule_applicable, payload_value, criterion_pattern = self._check_criterion(
+                criterion_k, criterion_v, payload_lookup)
             if not is_rule_applicable:
+                if self.extra_info:
+                    criteria_extra_info = '\n'.join([
+                        '  key: %s' % criterion_k,
+                        '  pattern: %s' % criterion_pattern,
+                        '  type: %s' % criterion_v['type'],
+                        '  payload: %s' % payload_value
+                    ])
+                    LOG.info('Validation for rule %s failed on criteria -\n%s', self.rule.ref,
+                             criteria_extra_info,
+                             extra=self._base_logger_context)
                 break
 
         if not is_rule_applicable:
@@ -122,10 +136,12 @@ class RuleFilter(object):
                           extra=self._base_logger_context)
             return False
 
-        return result
+        return result, payload_value, criteria_pattern
 
     def _render_criteria_pattern(self, criteria_pattern):
-        if not criteria_pattern:
+        # Note: Here we want to use strict comparison to None to make sure that
+        # other falsy values such as integer 0 are handled correctly.
+        if criteria_pattern is None:
             return None
 
         if not isinstance(criteria_pattern, six.string_types):
@@ -137,7 +153,39 @@ class RuleFilter(object):
         return criteria_pattern
 
 
-class PayloadLookup():
+class SecondPassRuleFilter(RuleFilter):
+    """
+    Special filter that handles all second pass rules. For not these are only
+    backstop rules i.e. those that can match when no other rule has matched.
+    """
+    def __init__(self, trigger_instance, trigger, rule, first_pass_matched):
+        """
+        :param trigger_instance: TriggerInstance DB object.
+        :type trigger_instance: :class:`TriggerInstanceDB``
+
+        :param trigger: Trigger DB object.
+        :type trigger: :class:`TriggerDB`
+
+        :param rule: Rule DB object.
+        :type rule: :class:`RuleDB`
+
+        :param first_pass_matched: Rules that matched in the first pass.
+        :type first_pass_matched: `list`
+        """
+        super(SecondPassRuleFilter, self).__init__(trigger_instance, trigger, rule)
+        self.first_pass_matched = first_pass_matched
+
+    def filter(self):
+        # backstop rules only apply if no rule matched in the first pass.
+        if self.first_pass_matched and self._is_backstop_rule():
+            return False
+        return super(SecondPassRuleFilter, self).filter()
+
+    def _is_backstop_rule(self):
+        return self.rule.type['ref'] == RULE_TYPE_BACKSTOP
+
+
+class PayloadLookup(object):
 
     def __init__(self, payload):
         self._context = {

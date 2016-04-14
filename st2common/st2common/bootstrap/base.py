@@ -24,6 +24,7 @@ from st2common.content.loader import MetaLoader
 from st2common.content.loader import ContentPackLoader
 from st2common.models.api.pack import PackAPI
 from st2common.persistence.pack import Pack
+from st2common.util.file_system import get_file_list
 
 __all__ = [
     'ResourceRegistrar'
@@ -37,11 +38,26 @@ LOG = logging.getLogger(__name__)
 # a long running process.
 REGISTERED_PACKS_CACHE = {}
 
+EXCLUDE_FILE_PATTERNS = [
+    '*.pyc'
+]
+
 
 class ResourceRegistrar(object):
     ALLOWED_EXTENSIONS = []
 
-    def __init__(self):
+    def __init__(self, use_pack_cache=True, fail_on_failure=False):
+        """
+        :param use_pack_cache: True to cache which packs have been registered in memory and making
+                                sure packs are only registered once.
+        :type use_pack_cache: ``bool``
+
+        :param fail_on_failure: Throw an exception if resource registration fails.
+        :type fail_on_failure: ``bool``
+        """
+        self._use_pack_cache = use_pack_cache
+        self._fail_on_failure = fail_on_failure
+
         self._meta_loader = MetaLoader()
         self._pack_loader = ContentPackLoader()
 
@@ -61,6 +77,14 @@ class ResourceRegistrar(object):
         resources = sorted(resources)
         return resources
 
+    def get_registered_packs(self):
+        """
+        Return a list of registered packs.
+
+        :rype: ``list``
+        """
+        return REGISTERED_PACKS_CACHE.keys()
+
     def register_packs(self, base_dirs):
         """
         Register packs in all the provided directories.
@@ -78,7 +102,7 @@ class ResourceRegistrar(object):
         """
         Register pack in the provided directory.
         """
-        if pack_name in REGISTERED_PACKS_CACHE:
+        if self._use_pack_cache and pack_name in REGISTERED_PACKS_CACHE:
             # This pack has already been registered during this register content run
             return
 
@@ -110,6 +134,11 @@ class ResourceRegistrar(object):
             raise ValueError('Pack "%s" metadata file is empty' % (pack_name))
 
         content['ref'] = pack_name
+
+        # Include a list of pack files
+        pack_file_list = get_file_list(directory=pack_dir, exclude_patterns=EXCLUDE_FILE_PATTERNS)
+        content['files'] = pack_file_list
+
         pack_api = PackAPI(**content)
         pack_db = PackAPI.to_model(pack_api)
 

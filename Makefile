@@ -1,11 +1,7 @@
+ROOT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 SHELL := /bin/bash
 TOX_DIR := .tox
 VIRTUALENV_DIR ?= virtualenv
-
-# Sphinx docs options
-SPHINXBUILD := sphinx-build
-DOC_SOURCE_DIR := docs/source
-DOC_BUILD_DIR := docs/build
 
 BINARIES := bin
 
@@ -14,32 +10,35 @@ COMPONENTS := $(wildcard st2*)
 
 # Components that implement a component-controlled test-runner. These components provide an
 # in-component Makefile. (Temporary fix until I can generalize the pecan unittest setup. -mar)
-COMPONENT_SPECIFIC_TESTS := st2tests
+# Note: We also want to ignore egg-info dir created during build
+COMPONENT_SPECIFIC_TESTS := st2tests st2client.egg-info
 
 # nasty hack to get a space into a variable
 space_char :=
 space_char +=
+comma := ,
 COMPONENT_PYTHONPATH = $(subst $(space_char),:,$(realpath $(COMPONENTS)))
 COMPONENTS_TEST := $(foreach component,$(filter-out $(COMPONENT_SPECIFIC_TESTS),$(COMPONENTS)),$(component))
+COMPONENTS_TEST_COMMA := $(subst $(space_char),$(comma),$(COMPONENTS_TEST))
 
 PYTHON_TARGET := 2.7
 
-REQUIREMENTS := requirements.txt test-requirements.txt st2client/requirements.txt
-
+REQUIREMENTS := test-requirements.txt requirements.txt
 PIP_OPTIONS := $(ST2_PIP_OPTIONS)
 
 ifndef PIP_OPTIONS
-	PIP_OPTIONS := -U -q -r
+	PIP_OPTIONS := -U -q
 endif
 
 .PHONY: all
-all: requirements check tests docs
+all: requirements check tests
 
 # Target for debugging Makefile variable assembly
 .PHONY: play
 play:
 	@echo COMPONENTS=$(COMPONENTS)
 	@echo COMPONENTS_TEST=$(COMPONENTS_TEST)
+	@echo COMPONENTS_TEST_COMMA=$(COMPONENTS_TEST_COMMA)
 	@echo COMPONENT_PYTHONPATH=$(COMPONENT_PYTHONPATH)
 
 
@@ -52,34 +51,6 @@ checklogs:
 	@echo "================== LOG WATCHER ===================="
 	@echo
 	. $(VIRTUALENV_DIR)/bin/activate; ./tools/log_watcher.py 10
-
-.PHONY: docs
-docs: requirements .docs
-
-.PHONY: .docs
-.docs:
-	@echo
-	@echo "====================docs===================="
-	@echo
-	. $(VIRTUALENV_DIR)/bin/activate; ./scripts/generate-runner-parameters-documentation.py
-	. $(VIRTUALENV_DIR)/bin/activate; ./scripts/generate-internal-triggers-table.py
-	@echo
-	. $(VIRTUALENV_DIR)/bin/activate; $(SPHINXBUILD) -W -b html $(DOC_SOURCE_DIR) $(DOC_BUILD_DIR)/html
-	@echo
-	@echo "Build finished. The HTML pages are in $(DOC_BUILD_DIR)/html."
-
-.PHONY: livedocs
-livedocs: docs .livedocs
-
-.PHONY: .livedocs
-.livedocs:
-	@echo
-	@echo "==========================================================="
-	@echo "                       RUNNING DOCS"
-	@echo "==========================================================="
-	@echo
-	. $(VIRTUALENV_DIR)/bin/activate; sphinx-autobuild -H 0.0.0.0 -b html $(DOC_SOURCE_DIR) $(DOC_BUILD_DIR)/html
-	@echo
 
 .PHONY: pylint
 pylint: requirements .pylint
@@ -94,12 +65,16 @@ pylint: requirements .pylint
 		echo "==========================================================="; \
 		echo "Running pylint on" $$component; \
 		echo "==========================================================="; \
-		. $(VIRTUALENV_DIR)/bin/activate; pylint -E --rcfile=./.pylintrc --load-plugins=pylint_plugins.api_models $$component/$$component || exit 1; \
+		. $(VIRTUALENV_DIR)/bin/activate; pylint -E --rcfile=./lint-configs/python/.pylintrc --load-plugins=pylint_plugins.api_models $$component/$$component || exit 1; \
 	done
 	# Lint Python pack management actions
-	. $(VIRTUALENV_DIR)/bin/activate; pylint -E --rcfile=./.pylintrc --load-plugins=pylint_plugins.api_models contrib/packs/actions/pack_mgmt/ || exit 1;
+	. $(VIRTUALENV_DIR)/bin/activate; pylint -E --rcfile=./lint-configs/python/.pylintrc --load-plugins=pylint_plugins.api_models contrib/packs/actions/ || exit 1;
+	# Lint other packs
+	. $(VIRTUALENV_DIR)/bin/activate; pylint -E --rcfile=./lint-configs/python/.pylintrc --load-plugins=pylint_plugins.api_models contrib/linux || exit 1;
+	. $(VIRTUALENV_DIR)/bin/activate; pylint -E --rcfile=./lint-configs/python/.pylintrc --load-plugins=pylint_plugins.api_models contrib/chatops || exit 1;
 	# Lint Python scripts
-	. $(VIRTUALENV_DIR)/bin/activate; pylint -E --rcfile=./.pylintrc --load-plugins=pylint_plugins.api_models scripts/*.py || exit 1;
+	. $(VIRTUALENV_DIR)/bin/activate; pylint -E --rcfile=./lint-configs/python/.pylintrc --load-plugins=pylint_plugins.api_models scripts/*.py || exit 1;
+	. $(VIRTUALENV_DIR)/bin/activate; pylint -E --rcfile=./lint-configs/python/.pylintrc --load-plugins=pylint_plugins.api_models tools/*.py || exit 1;
 
 .PHONY: flake8
 flake8: requirements .flake8
@@ -109,9 +84,12 @@ flake8: requirements .flake8
 	@echo
 	@echo "==================== flake ===================="
 	@echo
-	. $(VIRTUALENV_DIR)/bin/activate; flake8 --config ./.flake8 $(COMPONENTS)
-	. $(VIRTUALENV_DIR)/bin/activate; flake8 --config ./.flake8 contrib/packs/actions/pack_mgmt/
-	. $(VIRTUALENV_DIR)/bin/activate; flake8 --config ./.flake8 scripts/
+	. $(VIRTUALENV_DIR)/bin/activate; flake8 --config ./lint-configs/python/.flake8 $(COMPONENTS)
+	. $(VIRTUALENV_DIR)/bin/activate; flake8 --config ./lint-configs/python/.flake8 contrib/packs/actions/
+	. $(VIRTUALENV_DIR)/bin/activate; flake8 --config ./lint-configs/python/.flake8 contrib/linux
+	. $(VIRTUALENV_DIR)/bin/activate; flake8 --config ./lint-configs/python/.flake8 contrib/chatops/
+	. $(VIRTUALENV_DIR)/bin/activate; flake8 --config ./lint-configs/python/.flake8 scripts/
+	. $(VIRTUALENV_DIR)/bin/activate; flake8 --config ./lint-configs/python/.flake8 tools/
 
 .PHONY: lint
 lint: requirements .lint
@@ -120,7 +98,7 @@ lint: requirements .lint
 .lint: .flake8 .pylint
 
 .PHONY: clean
-clean: .cleanpycs .cleandocs
+clean: .cleanpycs
 
 .PHONY: compile
 compile:
@@ -133,10 +111,18 @@ compile:
 	@echo "Removing all .pyc files"
 	find $(COMPONENTS)  -name \*.pyc -type f -print0 | xargs -0 -I {} rm {}
 
-.PHONY: .cleandocs
-.cleandocs:
-	@echo "Removing generated documentation"
-	rm -rf $(DOC_BUILD_DIR)
+.PHONY: .st2client-dependencies-check
+.st2client-dependencies-check:
+	@echo "Checking for st2common imports inside st2client"
+	find ${ROOT_DIR}/st2client/st2client/ -name \*.py -type f -print0 | xargs -0 cat | grep st2common ; test $$? -eq 1
+
+.PHONY: .st2common-circular-dependencies-check
+.st2common-circular-dependencies-check:
+	@echo "Checking st2common for circular dependencies"
+	find ${ROOT_DIR}/st2common/st2common/ -name \*.py -type f -print0 | xargs -0 cat | grep st2reactor ; test $$? -eq 1
+	find ${ROOT_DIR}/st2common/st2common/ \( -name \*.py ! -name runnersregistrar\.py \) -type f -print0 | xargs -0 cat | grep st2actions ; test $$? -eq 1
+	find ${ROOT_DIR}/st2common/st2common/ -name \*.py -type f -print0 | xargs -0 cat | grep st2api ; test $$? -eq 1
+	find ${ROOT_DIR}/st2common/st2common/ -name \*.py -type f -print0 | xargs -0 cat | grep st2auth ; test $$? -eq 1
 
 .PHONY: .cleanmongodb
 .cleanmongodb:
@@ -146,9 +132,9 @@ compile:
 	@sudo rm -rf /var/lib/mongodb/*
 	@sudo chown -R mongodb:mongodb /var/lib/mongodb/
 	@sudo service mongodb start
-	@sleep 1
+	@sleep 15
 	@mongo --eval "rs.initiate()"
-	@sleep 5
+	@sleep 15
 
 .PHONY: .cleanmysql
 .cleanmysql:
@@ -156,7 +142,7 @@ compile:
 	@echo "----- Dropping all Mistral MYSQL databases -----"
 	@mysql -uroot -pStackStorm -e "DROP DATABASE IF EXISTS mistral"
 	@mysql -uroot -pStackStorm -e "CREATE DATABASE mistral"
-	@mysql -uroot -pStackStorm -e "GRANT ALL PRIVILEGES ON mistral.* TO 'mistral'@'localhost' IDENTIFIED BY 'StackStorm'"
+	@mysql -uroot -pStackStorm -e "GRANT ALL PRIVILEGES ON mistral.* TO 'mistral'@'127.0.0.1' IDENTIFIED BY 'StackStorm'"
 	@mysql -uroot -pStackStorm -e "FLUSH PRIVILEGES"
 	@/opt/openstack/mistral/.venv/bin/python /opt/openstack/mistral/tools/sync_db.py --config-file /etc/mistral/mistral.conf
 
@@ -176,13 +162,23 @@ distclean: clean
 	rm -rf $(VIRTUALENV_DIR)
 
 .PHONY: requirements
-requirements: virtualenv $(REQUIREMENTS)
+requirements: virtualenv .sdist-requirements
 	@echo
 	@echo "==================== requirements ===================="
 	@echo
+
+	# Make sure we use latest version of pip
+	$(VIRTUALENV_DIR)/bin/pip install --upgrade "pip>=7.1.2,<8.0.0"
+	$(VIRTUALENV_DIR)/bin/pip install virtualenv  # Required for packs.install in dev envs.
+
+	# Generate all requirements to support current CI pipeline.
+	$(VIRTUALENV_DIR)/bin/python scripts/fixate-requirements.py --skip=virtualenv -s st2*/in-requirements.txt -f fixed-requirements.txt -o requirements.txt
+
+	# Install requirements
+	#
 	for req in $(REQUIREMENTS); do \
-		echo "Installing $$req..." ; \
-		. $(VIRTUALENV_DIR)/bin/activate && pip install $(PIP_OPTIONS) $$req ; \
+			echo "Installing $$req..." ; \
+			$(VIRTUALENV_DIR)/bin/pip install $(PIP_OPTIONS) -r $$req ; \
 	done
 
 .PHONY: virtualenv
@@ -218,22 +214,20 @@ $(VIRTUALENV_DIR)/bin/activate:
 .PHONY: tests
 tests: pytests
 
-# Travis cannot run itests since those require users to be configured etc.
-# Creating special travis target. (Yuck!)
-.PHONY: tests-travis
-tests-travis: requirements unit-tests-coverage-xml
-
 .PHONY: pytests
 pytests: compile requirements .flake8 .pylint .pytests-coverage
 
 .PHONY: .pytests
-.pytests: compile unit-tests itests clean
+.pytests: compile .unit-tests .itests clean
 
 .PHONY: .pytests-coverage
-.pytests-coverage: unit-tests-coverage-html itests clean
+.pytests-coverage: .unit-tests-coverage-html .itests-coverage-html clean
 
 .PHONY: unit-tests
-unit-tests:
+unit-tests: requirements .unit-tests
+
+.PHONY: .unit-tests
+.unit-tests:
 	@echo
 	@echo "==================== tests ===================="
 	@echo
@@ -246,25 +240,8 @@ unit-tests:
 		. $(VIRTUALENV_DIR)/bin/activate; nosetests -s -v $$component/tests/unit || exit 1; \
 	done
 
-.PHONY: unit-tests-coverage-xml
-unit-tests-coverage-xml:
-	@echo
-	@echo "==================== unit tests with coverage (XML reports) ===================="
-	@echo
-	@echo "----- Dropping st2-test db -----"
-	@mongo st2-test --eval "db.dropDatabase();"
-	@for component in $(COMPONENTS_TEST); do\
-		echo "==========================================================="; \
-		echo "Running tests in" $$component; \
-		echo "==========================================================="; \
-		. $(VIRTUALENV_DIR)/bin/activate; nosetests -sv --with-coverage \
-			--cover-inclusive --cover-xml \
-			--cover-package=$$component $$component/tests/unit &&  \
-			mv coverage.xml coverage-$$component.xml || exit 1; \
-	done
-
-.PHONY: unit-tests-coverage-html
-unit-tests-coverage-html:
+.PHONY: .unit-tests-coverage-html
+.unit-tests-coverage-html:
 	@echo
 	@echo "==================== unit tests with coverage (HTML reports) ===================="
 	@echo
@@ -275,8 +252,8 @@ unit-tests-coverage-html:
 		echo "Running tests in" $$component; \
 		echo "==========================================================="; \
 		. $(VIRTUALENV_DIR)/bin/activate; nosetests -sv --with-coverage \
-			--cover-inclusive --cover-erase --cover-html \
-			--cover-package=$$component $$component/tests/unit || exit 1; \
+			--cover-inclusive --cover-html \
+			--cover-package=$(COMPONENTS_TEST_COMMA) $$component/tests/unit || exit 1; \
 	done
 
 .PHONY: itests
@@ -296,6 +273,22 @@ itests: requirements .itests
 		. $(VIRTUALENV_DIR)/bin/activate; nosetests -sv $$component/tests/integration || exit 1; \
 	done
 
+.PHONY: .itests-coverage-html
+.itests-coverage-html:
+	@echo
+	@echo "================ integration tests with coverage (HTML reports) ================"
+	@echo
+	@echo "----- Dropping st2-test db -----"
+	@mongo st2-test --eval "db.dropDatabase();"
+	@for component in $(COMPONENTS_TEST); do\
+		echo "==========================================================="; \
+		echo "Running tests in" $$component; \
+		echo "==========================================================="; \
+		. $(VIRTUALENV_DIR)/bin/activate; nosetests -sv --with-coverage \
+			--cover-inclusive --cover-html \
+			--cover-package=$(COMPONENTS_TEST_COMMA) $$component/tests/integration || exit 1; \
+	done
+
 .PHONY: mistral-itests
 mistral-itests: requirements .mistral-itests
 
@@ -303,9 +296,28 @@ mistral-itests: requirements .mistral-itests
 .mistral-itests:
 	@echo
 	@echo "==================== MISTRAL integration tests ===================="
-	@echo "The tests assume both st2 and mistral are running on localhost."
+	@echo "The tests assume both st2 and mistral are running on 127.0.0.1."
 	@echo
-	. $(VIRTUALENV_DIR)/bin/activate; nosetests -s -v st2tests/integration || exit 1;
+	. $(VIRTUALENV_DIR)/bin/activate; nosetests -s -v st2tests/integration/mistral || exit 1;
+
+.PHONY: .mistral-itests-coverage-html
+.mistral-itests-coverage-html:
+	@echo
+	@echo "==================== MISTRAL integration tests with coverage (HTML reports) ===================="
+	@echo "The tests assume both st2 and mistral are running on 127.0.0.1."
+	@echo
+	. $(VIRTUALENV_DIR)/bin/activate; nosetests -s -v --with-coverage \
+		--cover-inclusive --cover-html st2tests/integration/mistral || exit 1;
+
+.PHONY: packs-tests
+packs-tests: requirements .packs-tests
+
+.PHONY: .packs-tests
+.packs-tests:
+	@echo
+	@echo "==================== packs-tests ===================="
+	@echo
+	. $(VIRTUALENV_DIR)/bin/activate; find ${ROOT_DIR}/contrib/* -maxdepth 0 -type d -print0 | xargs -0 -I FILENAME ./st2common/bin/st2-run-pack-tests -x -p FILENAME
 
 .PHONY: rpms
 rpms:
@@ -332,3 +344,18 @@ debs:
 	rm -Rf ~/debbuild
 	$(foreach COM,$(COMPONENTS), pushd $(COM); make deb; popd;)
 	pushd st2client && make deb && popd
+
+# >>>>
+.PHONY: .sdist-requirements
+.sdist-requirements:
+	# Copy over shared dist utils module which is needed by setup.py
+	@for component in $(COMPONENTS_TEST); do\
+		cp -f ./scripts/dist_utils.py $$component/dist_utils.py;\
+	done
+
+	# Copy over CHANGELOG.RST, CONTRIBUTING.RST and LICENSE file to each component directory
+	#@for component in $(COMPONENTS_TEST); do\
+	#	test -s $$component/README.rst || cp -f README.rst $$component/; \
+	#	cp -f CONTRIBUTING.rst $$component/; \
+	#	cp -f LICENSE $$component/; \
+	#done

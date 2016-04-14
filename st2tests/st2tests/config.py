@@ -45,14 +45,16 @@ def _setup_config_opts():
 def _override_config_opts():
     _override_db_opts()
     _override_common_opts()
+    _override_api_opts()
 
 
 def _register_config_opts():
     _register_common_opts()
     _register_api_opts()
+    _register_stream_opts()
     _register_auth_opts()
     _register_action_sensor_opts()
-    _register_mistral_opts()
+    _register_ssh_runner_opts()
     _register_cloudslang_opts()
     _register_scheduler_opts()
     _register_exporter_opts()
@@ -65,12 +67,18 @@ def _override_db_opts():
 
 def _override_common_opts():
     packs_base_path = get_fixtures_base_path()
+    CONF.set_override(name='base_path', override=packs_base_path, group='system')
     CONF.set_override(name='system_packs_base_path', override=packs_base_path, group='content')
-    CONF.set_override(name='api_url', override='http://localhost', group='auth')
-    CONF.set_override(name='admin_users', override=['admin_user'], group='system')
+    CONF.set_override(name='packs_base_paths', override=packs_base_path, group='content')
+    CONF.set_override(name='api_url', override='http://127.0.0.1', group='auth')
     CONF.set_override(name='mask_secrets', override=True, group='log')
     CONF.set_override(name='url', override='zake://', group='coordination')
     CONF.set_override(name='lock_timeout', override=1, group='coordination')
+
+
+def _override_api_opts():
+    CONF.set_override(name='allow_origin', override=['http://127.0.0.1:3000', 'http://dev'],
+                      group='api')
 
 
 def _register_common_opts():
@@ -81,16 +89,6 @@ def _register_common_opts():
 
 
 def _register_api_opts():
-    api_opts = [
-        cfg.ListOpt('allow_origin', default=['http://localhost:3000', 'http://dev'],
-                    help='List of origins allowed'),
-        cfg.IntOpt('heartbeat', default=25,
-                   help='Send empty message every N seconds to keep connection open'),
-        cfg.BoolOpt('mask_secrets', default=True,
-                    help='True to mask secrets in API responses')
-    ]
-    _register_opts(api_opts, group='api')
-
     # XXX: note : template_path value only works if started from the top-level of the codebase.
     # Brittle!
     pecan_opts = [
@@ -107,8 +105,10 @@ def _register_api_opts():
     _register_opts(pecan_opts, group='api_pecan')
 
     messaging_opts = [
-        cfg.StrOpt('url', default='amqp://guest:guest@localhost:5672//',
-                   help='URL of the messaging server.')
+        cfg.StrOpt('url', default='amqp://guest:guest@127.0.0.1:5672//',
+                   help='URL of the messaging server.'),
+        cfg.ListOpt('cluster_urls', default=[],
+                    help='URL of all the nodes in a messaging service cluster.')
     ]
     _register_opts(messaging_opts, group='messaging')
 
@@ -118,9 +118,22 @@ def _register_api_opts():
                    help='Location of the script on the remote filesystem.'),
         cfg.BoolOpt('allow_partial_failure',
                     default=False,
-                    help='How partial success of actions run on multiple nodes should be treated.')
+                    help='How partial success of actions run on multiple nodes should be treated.'),
+        cfg.BoolOpt('use_ssh_config',
+                    default=False,
+                    help='Use the .ssh/config file. Useful to override ports etc.')
     ]
     _register_opts(ssh_runner_opts, group='ssh_runner')
+
+
+def _register_stream_opts():
+    stream_opts = [
+        cfg.IntOpt('heartbeat', default=25,
+                   help='Send empty message every N seconds to keep connection open'),
+        cfg.BoolOpt('debug', default=False,
+                    help='Specify to enable debug mode.'),
+    ]
+    _register_opts(stream_opts, group='stream')
 
 
 def _register_auth_opts():
@@ -141,7 +154,7 @@ def _register_action_sensor_opts():
         cfg.BoolOpt('enable', default=True,
                     help='Whether to enable or disable the ability ' +
                          'to post a trigger on action.'),
-        cfg.StrOpt('triggers_base_url', default='http://localhost:9101/v1/triggertypes/',
+        cfg.StrOpt('triggers_base_url', default='http://127.0.0.1:9101/v1/triggertypes/',
                    help='URL for action sensor to post TriggerType.'),
         cfg.IntOpt('request_timeout', default=1,
                    help='Timeout value of all httprequests made by action sensor.'),
@@ -153,14 +166,26 @@ def _register_action_sensor_opts():
     _register_opts(action_sensor_opts, group='action_sensor')
 
 
-def _register_mistral_opts():
-    mistral_opts = [
-        cfg.StrOpt('v2_base_url', default='http://localhost:8989/v2',
-                   help='Mistral v2 API server root endpoint.'),
-        cfg.IntOpt('max_attempts', default=2),
-        cfg.IntOpt('retry_wait', default=1)
+def _register_ssh_runner_opts():
+    ssh_runner_opts = [
+        cfg.BoolOpt('use_ssh_config', default=False,
+                    help='Use the .ssh/config file. Useful to override ports etc.'),
+        cfg.StrOpt('remote_dir',
+                   default='/tmp',
+                   help='Location of the script on the remote filesystem.'),
+        cfg.BoolOpt('allow_partial_failure',
+                    default=False,
+                    help='How partial success of actions run on multiple nodes ' +
+                         'should be treated.'),
+        cfg.BoolOpt('use_paramiko_ssh_runner',
+                    default=False,
+                    help='Use Paramiko based SSH runner as the default remote runner. ' +
+                         'EXPERIMENTAL!!! USE AT YOUR OWN RISK.'),
+        cfg.IntOpt('max_parallel_actions', default=50,
+                   help='Max number of parallel remote SSH actions that should be run.  ' +
+                        'Works only with Paramiko SSH runner.'),
     ]
-    _register_opts(mistral_opts, group='mistral')
+    _register_opts(ssh_runner_opts, group='ssh_runner')
 
 
 def _register_cloudslang_opts():

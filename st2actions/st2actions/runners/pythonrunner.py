@@ -18,23 +18,30 @@ import sys
 import abc
 import json
 import uuid
-import logging as stdlib_logging
 
 import six
 from eventlet.green import subprocess
 
 from st2actions.runners import ActionRunner
+from st2actions.runners.utils import get_logger_for_python_runner_action
 from st2common.util.green.shell import run_command
-from st2common import log as logging
 from st2common.constants.action import ACTION_OUTPUT_RESULT_DELIMITER
-from st2common.constants.action import LIVEACTION_STATUS_SUCCEEDED, LIVEACTION_STATUS_FAILED
+from st2common.constants.action import LIVEACTION_STATUS_SUCCEEDED
+from st2common.constants.action import LIVEACTION_STATUS_FAILED
+from st2common.constants.action import LIVEACTION_STATUS_TIMED_OUT
 from st2common.constants.error_messages import PACK_VIRTUALENV_DOESNT_EXIST
+from st2common.util.sandboxing import get_sandbox_path
 from st2common.util.sandboxing import get_sandbox_python_path
 from st2common.util.sandboxing import get_sandbox_python_binary_path
 from st2common.util.sandboxing import get_sandbox_virtualenv_path
 from st2common.constants.runners import PYTHON_RUNNER_DEFAULT_ACTION_TIMEOUT
 
-LOG = logging.getLogger(__name__)
+__all__ = [
+    'get_runner',
+
+    'PythonRunner',
+    'Action'
+]
 
 # constants to lookup in runner_parameters.
 RUNNER_ENV = 'env'
@@ -57,35 +64,21 @@ class Action(object):
 
     description = None
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, action_service=None):
         """
         :param config: Action config.
         :type config: ``dict``
+
+        :param action_service: ActionService object.
+        :type action_service: :class:`ActionService~
         """
         self.config = config or {}
-        self.logger = self._set_up_logger()
+        self.action_service = action_service
+        self.logger = get_logger_for_python_runner_action(action_name=self.__class__.__name__)
 
     @abc.abstractmethod
     def run(self, **kwargs):
         pass
-
-    def _set_up_logger(self):
-        """
-        Set up a logger which logs all the messages with level DEBUG
-        and above to stderr.
-        """
-        logger_name = 'actions.python.%s' % (self.__class__.__name__)
-        logger = logging.getLogger(logger_name)
-
-        console = stdlib_logging.StreamHandler()
-        console.setLevel(stdlib_logging.DEBUG)
-
-        formatter = stdlib_logging.Formatter('%(name)-12s: %(levelname)-8s %(message)s')
-        console.setFormatter(formatter)
-        logger.addHandler(console)
-        logger.setLevel(stdlib_logging.DEBUG)
-
-        return logger
 
 
 class PythonRunner(ActionRunner):
@@ -112,7 +105,8 @@ class PythonRunner(ActionRunner):
         python_path = get_sandbox_python_binary_path(pack=pack)
 
         if virtualenv_path and not os.path.isdir(virtualenv_path):
-            msg = PACK_VIRTUALENV_DOESNT_EXIST % (pack, pack)
+            format_values = {'pack': pack, 'virtualenv_path': virtualenv_path}
+            msg = PACK_VIRTUALENV_DOESNT_EXIST % format_values
             raise Exception(msg)
 
         if not self.entry_point:
@@ -130,6 +124,7 @@ class PythonRunner(ActionRunner):
         # We need to ensure all the st2 dependencies are also available to the
         # subprocess
         env = os.environ.copy()
+        env['PATH'] = get_sandbox_path(virtualenv_path=virtualenv_path)
         env['PYTHONPATH'] = get_sandbox_python_path(inherit_from_parent=True,
                                                     inherit_parent_virtualenv=True)
 
@@ -173,7 +168,13 @@ class PythonRunner(ActionRunner):
         if error:
             output['error'] = error
 
-        status = LIVEACTION_STATUS_SUCCEEDED if exit_code == 0 else LIVEACTION_STATUS_FAILED
+        if exit_code == 0:
+            status = LIVEACTION_STATUS_SUCCEEDED
+        elif timed_out:
+            status = LIVEACTION_STATUS_TIMED_OUT
+        else:
+            status = LIVEACTION_STATUS_FAILED
+
         return (status, output, None)
 
     def _get_env_vars(self):

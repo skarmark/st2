@@ -1,9 +1,45 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
+function usage() {
+    echo "Usage: $0 [start|stop|restart|startclean] [-r runner_count] [-g] [-x] [-c]" >&2
+}
+
+subcommand=$1; shift
 runner_count=1
-if [ "$#" -gt 1 ]; then
-    runner_count=${2}
-fi
+use_gunicorn=true
+use_uwsgi_for_auth=false
+copy_examples=false
+load_content=true
+
+while getopts ":r:gxcu" o; do
+    case "${o}" in
+        r)
+            runner_count=${OPTARG}
+            ;;
+        g)
+            use_gunicorn=false
+            ;;
+        u)
+            use_uwsgi_for_auth=true
+            ;;
+        x)
+            copy_examples=true
+            ;;
+        c)
+            load_content=false
+            ;;
+        \?)
+            echo "Invalid option: -$OPTARG" >&2
+            usage
+            exit 2
+            ;;
+        :)
+            echo "Option -$OPTARG requires an argument." >&2
+            usage
+            exit 2
+            ;;
+    esac
+done
 
 function init(){
     ST2_BASE_DIR="/opt/stackstorm"
@@ -62,13 +98,21 @@ function st2start(){
         sudo mkdir -p $PACKS_BASE_DIR
     fi
 
+    VIRTUALENVS_DIR=$ST2_BASE_DIR/virtualenvs
+
     sudo mkdir -p $PACKS_BASE_DIR/default/sensors/
     sudo mkdir -p $PACKS_BASE_DIR/default/actions/
     sudo mkdir -p $PACKS_BASE_DIR/default/rules/
+    sudo mkdir -p $VIRTUALENVS_DIR
     sudo chown -R ${CURRENT_USER}:${CURRENT_USER_GROUP} $PACKS_BASE_DIR
+    sudo chown -R ${CURRENT_USER}:${CURRENT_USER_GROUP} $VIRTUALENVS_DIR
     cp -Rp ./contrib/core/ $PACKS_BASE_DIR
     cp -Rp ./contrib/packs/ $PACKS_BASE_DIR
-    cp -Rp ./contrib/examples $PACKS_BASE_DIR
+
+    if [ "$copy_examples" = true ]; then
+        echo "Copying examples from ./contrib/examples to $PACKS_BASE_DIR"
+        cp -Rp ./contrib/examples $PACKS_BASE_DIR
+    fi
 
     # activate virtualenv to set PYTHONPATH
     source ./virtualenv/bin/activate
@@ -83,9 +127,28 @@ function st2start(){
 
     # Run the st2 API server
     echo 'Starting screen session st2-api...'
-    screen -d -m -S st2-api ./virtualenv/bin/python \
-        ./st2api/bin/st2api \
-        --config-file $ST2_CONF
+    if [ "${use_gunicorn}" = true ]; then
+        echo '  using gunicorn to run st2-api...'
+        export ST2_CONFIG_PATH=${ST2_CONF}
+        screen -d -m -S st2-api ./virtualenv/bin/gunicorn_pecan \
+            ./st2api/st2api/gunicorn_config.py -k eventlet -b 0.0.0.0:9101 --workers 1
+    else
+        screen -d -m -S st2-api ./virtualenv/bin/python \
+            ./st2api/bin/st2api \
+            --config-file $ST2_CONF
+    fi
+
+    # Run st2stream API server
+    if [ "${use_gunicorn}" = true ]; then
+        echo '  using gunicorn to run st2-stream'
+        export ST2_CONFIG_PATH=${ST2_CONF}
+        screen -d -m -S st2-stream ./virtualenv/bin/gunicorn_pecan \
+            ./st2stream/st2stream/gunicorn_config.py -k eventlet -b 0.0.0.0:9102 --workers 1
+    else
+        screen -d -m -S st2-stream ./virtualenv/bin/python \
+            ./st2stream/bin/st2stream \
+            --config-file $ST2_CONF
+    fi
 
     # Start a screen for every runner
     echo 'Starting screen sessions for st2-actionrunner(s)...'
@@ -126,9 +189,22 @@ function st2start(){
 
     # Run the auth API server
     echo 'Starting screen session st2-auth...'
-    screen -d -m -S st2-auth ./virtualenv/bin/python \
+    if [ "${use_uwsgi_for_auth}" = true ]; then
+        echo '  using uwsgi for auth...'
+        export ST2_CONFIG_PATH=${ST2_CONF}
+        screen -d -m -S st2-auth ./virtualenv/bin/uwsgi \
+            --http 0.0.0.0:9100 --wsgi-file ./st2auth/st2auth/wsgi.py --processes 1 --threads 10 \
+            --buffer-size=32768
+    elif [ "${use_gunicorn}" = true ]; then
+        echo '  using gunicorn to run st2-auth...'
+        export ST2_CONFIG_PATH=${ST2_CONF}
+        screen -d -m -S st2-auth ./virtualenv/bin/gunicorn_pecan \
+            ./st2auth/st2auth/gunicorn_config.py -k eventlet -b 0.0.0.0:9100 --workers 1
+    else
+        screen -d -m -S st2-auth ./virtualenv/bin/python \
         ./st2auth/bin/st2auth \
         --config-file $ST2_CONF
+    fi
 
     if [ -n "$ST2_EXPORTER" ]; then
         EXPORTS_DIR=$(exportsdir)
@@ -160,14 +236,16 @@ function st2start(){
         fi
     done
 
-    # Register contents
-    echo 'Registering sensors, actions, rules, aliases, and policies...'
-    ./virtualenv/bin/python \
-        ./st2common/bin/st2-register-content \
-        --config-file $ST2_CONF --register-all
+    if [ "$load_content" = true ]; then
+        # Register contents
+        echo 'Registering sensors, actions, rules, aliases, and policies...'
+        ./virtualenv/bin/python \
+            ./st2common/bin/st2-register-content \
+            --config-file $ST2_CONF --register-all
+    fi
 
     # List screen sessions
-    screen -ls
+    screen -ls || exit 0
 }
 
 function st2stop(){
@@ -176,6 +254,19 @@ function st2stop(){
         echo 'Killing existing st2 screen sessions...'
         screen -ls | grep st2 | cut -d. -f1 | awk '{print $1}' | xargs -L 1 pkill -P
     fi
+
+    if [ "${use_gunicorn}" = true ]; then
+        pids=`ps -ef | grep "gunicorn_config.py" | awk '{print $2}'`
+        if [ -n "$pids" ]; then
+            echo "Killing gunicorn processes"
+            # true ensures that any failure to kill a process which does not exist will not lead
+            # to failure. for loop to ensure all processes are killed even if some are missing
+            # assuming kill will fail-fast.
+            for pid in ${pids}; do
+                echo ${pid} | xargs -L 1 kill -9 || true
+            done
+        fi
+    fi
 }
 
 function st2clean(){
@@ -183,7 +274,9 @@ function st2clean(){
     mongo st2 --eval "db.dropDatabase();"
     # start with clean logs
     LOGDIR=$(dirname $0)/../logs
-    rm ${LOGDIR}/*
+    if [ -d ${LOGDIR} ]; then
+        rm ${LOGDIR}/*
+    fi
     if [ -n "$ST2_EXPORTER" ]; then
         EXPORTS_DIR=$(exportsdir)
         echo "Removing $EXPORTS_DIR..."
@@ -191,7 +284,7 @@ function st2clean(){
     fi
 }
 
-case ${1} in
+case ${subcommand} in
 start)
     init
     st2start
@@ -211,6 +304,6 @@ restart)
     st2start
     ;;
 *)
-    echo "Usage: $0 [start|stop|restart|startclean]" >&2
+    usage
     ;;
 esac

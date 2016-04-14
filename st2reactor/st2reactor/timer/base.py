@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import uuid
+
 from apscheduler.schedulers.background import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -23,10 +25,12 @@ import jsonschema
 
 from st2common import log as logging
 from st2common.constants.triggers import TIMER_TRIGGER_TYPES
+from st2common.models.api.trace import TraceContext
 import st2common.services.triggers as trigger_services
 from st2common.services.triggerwatcher import TriggerWatcher
 from st2common.transport.reactor import TriggerDispatcher
 from st2common.util import date as date_utils
+from st2common.util import schema as util_schema
 
 LOG = logging.getLogger(__name__)
 
@@ -44,7 +48,8 @@ class St2Timer(object):
                                                update_handler=self._handle_update_trigger,
                                                delete_handler=self._handle_delete_trigger,
                                                trigger_types=self._trigger_types,
-                                               queue_suffix='timers')
+                                               queue_suffix=self.__class__.__name__,
+                                               exclusive=True)
         self._trigger_dispatcher = TriggerDispatcher(LOG)
 
     def start(self):
@@ -63,22 +68,26 @@ class St2Timer(object):
         self.add_trigger(trigger)
 
     def remove_trigger(self, trigger):
-        id = trigger['id']
+        trigger_id = trigger['id']
 
         try:
-            job_id = self._jobs[id]
+            job_id = self._jobs[trigger_id]
         except KeyError:
-            LOG.info('Job not found: %s', id)
+            LOG.info('Job not found: %s', trigger_id)
             return
 
         self._scheduler.remove_job(job_id)
+        del self._jobs[trigger_id]
 
     def _add_job_to_scheduler(self, trigger):
         trigger_type_ref = trigger['type']
         trigger_type = TIMER_TRIGGER_TYPES[trigger_type_ref]
         try:
-            jsonschema.validate(trigger['parameters'],
-                                trigger_type['parameters_schema'])
+            util_schema.validate(instance=trigger['parameters'],
+                                 schema=trigger_type['parameters_schema'],
+                                 cls=util_schema.CustomValidator,
+                                 use_default=True,
+                                 allow_default_none=True)
         except jsonschema.ValidationError as e:
             LOG.error('Exception scheduling timer: %s, %s',
                       trigger['parameters'], e, exc_info=True)
@@ -109,6 +118,7 @@ class St2Timer(object):
                         trigger['parameters'], time_type.run_date)
         else:
             self._add_job(trigger, time_type)
+        return time_type
 
     def _add_job(self, trigger, time_type, replace=True):
         try:
@@ -124,13 +134,23 @@ class St2Timer(object):
 
     def _emit_trigger_instance(self, trigger):
         utc_now = date_utils.get_datetime_utc_now()
-        LOG.info('Timer fired at: %s. Trigger: %s', str(utc_now), trigger)
+        # debug logging is reasonable for this one. A high resolution timer will end up
+        # trashing standard logs.
+        LOG.debug('Timer fired at: %s. Trigger: %s', str(utc_now), trigger)
 
         payload = {
             'executed_at': str(utc_now),
             'schedule': trigger['parameters'].get('time')
         }
-        self._trigger_dispatcher.dispatch(trigger, payload)
+
+        trace_context = TraceContext(trace_tag='%s-%s' % (self._get_trigger_type_name(trigger),
+                                                          trigger.get('name', uuid.uuid4().hex)))
+        self._trigger_dispatcher.dispatch(trigger, payload, trace_context=trace_context)
+
+    def _get_trigger_type_name(self, trigger):
+        trigger_type_ref = trigger['type']
+        trigger_type = TIMER_TRIGGER_TYPES[trigger_type_ref]
+        return trigger_type['name']
 
     def _register_timer_trigger_types(self):
         return trigger_services.add_trigger_models(TIMER_TRIGGER_TYPES.values())

@@ -16,7 +16,7 @@
 from st2client.commands import resource
 from st2client.formatters import table
 from st2client.models import TriggerInstance
-from st2client.utils.date import format_isodate
+from st2client.utils.date import format_isodate_for_user_timezone
 
 
 class TriggerInstanceResendCommand(resource.ResourceCommand):
@@ -60,10 +60,10 @@ class TriggerInstanceBranch(resource.ResourceBranch):
 
 
 class TriggerInstanceListCommand(resource.ResourceCommand):
-    display_attributes = ['id', 'trigger', 'occurrence_time', 'payload']
+    display_attributes = ['id', 'trigger', 'occurrence_time']
 
     attribute_transform_functions = {
-        'occurrence_time': format_isodate
+        'occurrence_time': format_isodate_for_user_timezone
     }
 
     def __init__(self, resource, *args, **kwargs):

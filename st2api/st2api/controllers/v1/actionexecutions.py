@@ -15,6 +15,9 @@
 
 import copy
 import re
+import httplib
+import sys
+import traceback
 
 import jsonschema
 from oslo_config import cfg
@@ -27,8 +30,11 @@ from st2api.controllers.resource import ResourceController
 from st2api.controllers.v1.executionviews import ExecutionViewsController
 from st2api.controllers.v1.executionviews import SUPPORTED_FILTERS
 from st2common import log as logging
-from st2common.constants.action import LIVEACTION_STATUS_CANCELED
-from st2common.constants.action import CANCELABLE_STATES
+from st2common.constants.action import LIVEACTION_STATUS_CANCELED, LIVEACTION_STATUS_FAILED
+from st2common.constants.action import LIVEACTION_CANCELABLE_STATES
+from st2common.exceptions.param import ParamException
+from st2common.exceptions.apivalidation import ValueValidationException
+from st2common.exceptions.trace import TraceNotFoundException
 from st2common.models.api.action import LiveActionAPI
 from st2common.models.api.base import jsexpose
 from st2common.models.api.execution import ActionExecutionAPI
@@ -37,10 +43,17 @@ from st2common.persistence.liveaction import LiveAction
 from st2common.persistence.execution import ActionExecution
 from st2common.services import action as action_service
 from st2common.services import executions as execution_service
+from st2common.services import trace as trace_service
 from st2common.rbac.utils import request_user_is_admin
 from st2common.util import jsonify
 from st2common.util import isotime
-from st2common.util import date as date_utils
+from st2common.util import action_db as action_utils
+from st2common.util.api import get_requester
+from st2common.util import param as param_utils
+from st2common.rbac.types import PermissionType
+from st2common.rbac.decorators import request_user_has_permission
+from st2common.rbac.decorators import request_user_has_resource_db_permission
+from st2common.rbac.utils import assert_request_user_has_resource_db_permission
 
 __all__ = [
     'ActionExecutionsController'
@@ -49,7 +62,7 @@ __all__ = [
 LOG = logging.getLogger(__name__)
 
 # Note: We initialize filters here and not in the constructor
-SUPPORTED_EXECUTIONS_FILTERS = SUPPORTED_FILTERS
+SUPPORTED_EXECUTIONS_FILTERS = copy.deepcopy(SUPPORTED_FILTERS)
 SUPPORTED_EXECUTIONS_FILTERS.update({
     'timestamp_gt': 'start_timestamp.gt',
     'timestamp_lt': 'start_timestamp.lt'
@@ -93,47 +106,72 @@ class ActionExecutionsControllerMixin(BaseRestControllerMixin):
 
         return from_model_kwargs
 
-    def _handle_schedule_execution(self, execution):
+    def _handle_schedule_execution(self, liveaction):
+        # Assert the permissions
+        action_ref = liveaction.action
+        action_db = action_utils.get_action_by_ref(action_ref)
+
+        assert_request_user_has_resource_db_permission(request=pecan.request, resource_db=action_db,
+            permission_type=PermissionType.ACTION_EXECUTE)
+
         try:
-            return self._schedule_execution(execution=execution)
+            return self._schedule_execution(liveaction=liveaction)
         except ValueError as e:
             LOG.exception('Unable to execute action.')
             abort(http_client.BAD_REQUEST, str(e))
         except jsonschema.ValidationError as e:
             LOG.exception('Unable to execute action. Parameter validation failed.')
             abort(http_client.BAD_REQUEST, re.sub("u'([^']*)'", r"'\1'", e.message))
+        except TraceNotFoundException as e:
+            abort(http_client.BAD_REQUEST, str(e))
+        except ValueValidationException as e:
+            raise e
         except Exception as e:
             LOG.exception('Unable to execute action. Unexpected error encountered.')
             abort(http_client.INTERNAL_SERVER_ERROR, str(e))
 
-    def _schedule_execution(self, execution):
+    def _schedule_execution(self, liveaction):
         # Initialize execution context if it does not exist.
-        if not hasattr(execution, 'context'):
-            execution.context = dict()
+        if not hasattr(liveaction, 'context'):
+            liveaction.context = dict()
 
-        # Retrieve username of the authed user (note - if auth is disabled, user will not be
-        # set so we fall back to the system user name)
-        request_token = pecan.request.context.get('token', None)
-
-        if request_token:
-            user = request_token.user
-        else:
-            user = cfg.CONF.system_user.user
-
-        execution.context['user'] = user
+        liveaction.context['user'] = get_requester()
+        LOG.debug('User is: %s' % liveaction.context['user'])
 
         # Retrieve other st2 context from request header.
-        if ('st2-context' in pecan.request.headers and pecan.request.headers['st2-context']):
+        if 'st2-context' in pecan.request.headers and pecan.request.headers['st2-context']:
             context = jsonify.try_loads(pecan.request.headers['st2-context'])
             if not isinstance(context, dict):
                 raise ValueError('Unable to convert st2-context from the headers into JSON.')
-            execution.context.update(context)
+            liveaction.context.update(context)
 
         # Schedule the action execution.
-        liveactiondb = LiveActionAPI.to_model(execution)
-        _, actionexecutiondb = action_service.request(liveactiondb)
+        liveaction_db = LiveActionAPI.to_model(liveaction)
+        liveaction_db, actionexecution_db = action_service.create_request(liveaction_db)
+
+        action_db = action_utils.get_action_by_ref(liveaction_db.action)
+        runnertype_db = action_utils.get_runnertype_by_name(action_db.runner_type['name'])
+
+        try:
+            liveaction_db.parameters = param_utils.render_live_params(
+                runnertype_db.runner_parameters, action_db.parameters, liveaction_db.parameters,
+                liveaction_db.context)
+        except ParamException:
+            # By this point the execution is already in the DB therefore need to mark it failed.
+            _, e, tb = sys.exc_info()
+            action_service.update_status(
+                liveaction=liveaction_db,
+                new_status=LIVEACTION_STATUS_FAILED,
+                result={'error': str(e), 'traceback': ''.join(traceback.format_tb(tb, 20))})
+            # Might be a good idea to return the actual ActionExecution rather than bubble up
+            # the execption.
+            raise ValueValidationException(str(e))
+
+        liveaction_db = LiveAction.add_or_update(liveaction_db, publish=False)
+
+        _, actionexecution_db = action_service.publish_request(liveaction_db, actionexecution_db)
         from_model_kwargs = self._get_from_model_kwargs_for_request(request=pecan.request)
-        return ActionExecutionAPI.from_model(actionexecutiondb, from_model_kwargs)
+        return ActionExecutionAPI.from_model(actionexecution_db, from_model_kwargs)
 
     def _get_result_object(self, id):
         """
@@ -176,7 +214,23 @@ class ActionExecutionsControllerMixin(BaseRestControllerMixin):
         return exclude_fields
 
 
-class ActionExecutionChildrenController(ActionExecutionsControllerMixin):
+class BaseActionExecutionNestedController(ActionExecutionsControllerMixin, ResourceController):
+    # Note: We need to override "get_one" and "get_all" to return 404 since nested controller
+    # don't implement thos methods
+
+    # ResourceController attributes
+    query_options = {}
+    supported_filters = {}
+
+    def get_all(self):
+        abort(httplib.NOT_FOUND)
+
+    def get_one(self, id):
+        abort(httplib.NOT_FOUND)
+
+
+class ActionExecutionChildrenController(BaseActionExecutionNestedController):
+    @request_user_has_resource_db_permission(permission_type=PermissionType.EXECUTION_VIEW)
     @jsexpose(arg_types=[str])
     def get(self, id, **kwargs):
         """
@@ -187,7 +241,8 @@ class ActionExecutionChildrenController(ActionExecutionsControllerMixin):
         return self._get_children(id_=id, **kwargs)
 
 
-class ActionExecutionAttributeController(ActionExecutionsControllerMixin):
+class ActionExecutionAttributeController(BaseActionExecutionNestedController):
+    @request_user_has_resource_db_permission(permission_type=PermissionType.EXECUTION_VIEW)
     @jsexpose()
     def get(self, id, attribute, **kwargs):
         """
@@ -195,7 +250,7 @@ class ActionExecutionAttributeController(ActionExecutionsControllerMixin):
 
         Handles requests:
 
-            GET /actionexecutions/<id>/<attribute>
+            GET /executions/<id>/attribute/<attribute name>
 
         :rtype: ``dict``
         """
@@ -213,18 +268,33 @@ class ActionExecutionReRunController(ActionExecutionsControllerMixin, ResourceCo
         'trigger_instance'
     ]
 
-    class ExecutionParameters(object):
-        def __init__(self, parameters=None):
+    class ExecutionSpecificationAPI(object):
+        def __init__(self, parameters=None, tasks=None, reset=None):
             self.parameters = parameters or {}
+            self.tasks = tasks or []
+            self.reset = reset or []
 
         def validate(self):
+            if (self.tasks or self.reset) and self.parameters:
+                raise ValueError('Parameters override is not supported when '
+                                 're-running task(s) for a workflow.')
+
             if self.parameters:
                 assert isinstance(self.parameters, dict)
 
-            return True
+            if self.tasks:
+                assert isinstance(self.tasks, list)
 
-    @jsexpose(body_cls=ExecutionParameters, status_code=http_client.CREATED)
-    def post(self, execution_parameters, execution_id):
+            if self.reset:
+                assert isinstance(self.reset, list)
+
+            if list(set(self.reset) - set(self.tasks)):
+                raise ValueError('List of tasks to reset does not match the tasks to rerun.')
+
+            return self
+
+    @jsexpose(body_cls=ExecutionSpecificationAPI, status_code=http_client.CREATED)
+    def post(self, spec, execution_id):
         """
         Re-run the provided action execution optionally specifying override parameters.
 
@@ -232,21 +302,43 @@ class ActionExecutionReRunController(ActionExecutionsControllerMixin, ResourceCo
 
             POST /executions/<id>/re_run
         """
-        parameters = execution_parameters.parameters
-
-        # Note: We only really need parameters here
         existing_execution = self._get_one(id=execution_id, exclude_fields=self.exclude_fields)
 
+        if spec.tasks and existing_execution.runner['name'] != 'mistral-v2':
+            raise ValueError('Task option is only supported for Mistral workflows.')
+
         # Merge in any parameters provided by the user
-        new_parameters = copy.deepcopy(existing_execution.parameters)
-        new_parameters.update(parameters)
+        new_parameters = copy.deepcopy(getattr(existing_execution, 'parameters', {}))
+        new_parameters.update(spec.parameters)
 
         # Create object for the new execution
         action_ref = existing_execution.action['ref']
-        new_execution = LiveActionDB(action=action_ref, parameters=new_parameters)
 
-        result = self._handle_schedule_execution(execution=new_execution)
-        return result
+        # Include additional option(s) for the execution
+        context = {
+            're-run': {
+                'ref': execution_id,
+            }
+        }
+
+        if spec.tasks:
+            context['re-run']['tasks'] = spec.tasks
+
+        if spec.reset:
+            context['re-run']['reset'] = spec.reset
+
+        # Add trace to the new execution
+        trace = trace_service.get_trace_db_by_action_execution(
+            action_execution_id=existing_execution.id)
+
+        if trace:
+            context['trace_context'] = {'id_': str(trace.id)}
+
+        new_liveaction = LiveActionDB(action=action_ref,
+                                      context=context,
+                                      parameters=new_parameters)
+
+        return self._handle_schedule_execution(liveaction=new_liveaction)
 
 
 class ActionExecutionsController(ActionExecutionsControllerMixin, ResourceController):
@@ -264,7 +356,7 @@ class ActionExecutionsController(ActionExecutionsControllerMixin, ResourceContro
 
     # ResourceController attributes
     query_options = {
-        'sort': ['-start_timestamp', 'action']
+        'sort': ['-start_timestamp', 'action.ref']
     }
     supported_filters = SUPPORTED_EXECUTIONS_FILTERS
     filter_transform_functions = {
@@ -272,13 +364,14 @@ class ActionExecutionsController(ActionExecutionsControllerMixin, ResourceContro
         'timestamp_lt': lambda value: isotime.parse(value=value)
     }
 
+    @request_user_has_permission(permission_type=PermissionType.EXECUTION_LIST)
     @jsexpose()
     def get_all(self, exclude_attributes=None, **kw):
         """
-        List all actionexecutions.
+        List all executions.
 
         Handles requests:
-            GET /actionexecutions[?exclude_attributes=result,trigger_instance]
+            GET /executions[?exclude_attributes=result,trigger_instance]
 
         :param exclude_attributes: Comma delimited string of attributes to exclude from the object.
         :type exclude_attributes: ``str``
@@ -290,15 +383,25 @@ class ActionExecutionsController(ActionExecutionsControllerMixin, ResourceContro
 
         exclude_fields = self._validate_exclude_fields(exclude_fields=exclude_fields)
 
+        # Use a custom sort order when filtering on a timestamp so we return a correct result as
+        # expected by the user
+        if 'timestamp_lt' in kw:
+            query_options = {'sort': ['-start_timestamp', 'action.ref']}
+            kw['query_options'] = query_options
+        elif 'timestamp_gt' in kw:
+            query_options = {'sort': ['+start_timestamp', 'action.ref']}
+            kw['query_options'] = query_options
+
         return self._get_action_executions(exclude_fields=exclude_fields, **kw)
 
+    @request_user_has_resource_db_permission(permission_type=PermissionType.EXECUTION_VIEW)
     @jsexpose(arg_types=[str])
     def get_one(self, id, exclude_attributes=None, **kwargs):
         """
         Retrieve a single execution.
 
         Handles requests:
-            GET /actionexecutions/<id>[?exclude_attributes=result,trigger_instance]
+            GET /executions/<id>[?exclude_attributes=result,trigger_instance]
 
         :param exclude_attributes: Comma delimited string of attributes to exclude from the object.
         :type exclude_attributes: ``str``
@@ -313,23 +416,23 @@ class ActionExecutionsController(ActionExecutionsControllerMixin, ResourceContro
         return self._get_one(id=id, exclude_fields=exclude_fields)
 
     @jsexpose(body_cls=LiveActionAPI, status_code=http_client.CREATED)
-    def post(self, execution):
-        return self._handle_schedule_execution(execution=execution)
+    def post(self, liveaction):
+        return self._handle_schedule_execution(liveaction=liveaction)
 
+    @request_user_has_resource_db_permission(permission_type=PermissionType.EXECUTION_STOP)
     @jsexpose(arg_types=[str])
     def delete(self, exec_id):
         """
         Stops a single execution.
 
         Handles requests:
-            DELETE /actionexecutions/<id>
+            DELETE /executions/<id>
 
         """
         execution_api = self._get_one(id=exec_id)
 
         if not execution_api:
             abort(http_client.NOT_FOUND, 'Execution with id %s not found.' % exec_id)
-            return
 
         liveaction_id = execution_api.liveaction['id']
         if not liveaction_id:
@@ -341,30 +444,22 @@ class ActionExecutionsController(ActionExecutionsControllerMixin, ResourceContro
         except:
             abort(http_client.INTERNAL_SERVER_ERROR,
                   'Execution object missing link to liveaction %s.' % liveaction_id)
-            return
 
         if liveaction_db.status == LIVEACTION_STATUS_CANCELED:
-            abort(http_client.OK,
-                  'Action is already in "canceled" state.')
+            abort(http_client.OK, 'Action is already in "canceled" state.')
 
-        if liveaction_db.status not in CANCELABLE_STATES:
-            abort(http_client.OK,
-                  'Action cannot be canceled. State = %s.' % liveaction_db.status)
-            return
+        if liveaction_db.status not in LIVEACTION_CANCELABLE_STATES:
+            abort(http_client.OK, 'Action cannot be canceled. State = %s.' % liveaction_db.status)
 
-        liveaction_db.status = 'canceled'
-        liveaction_db.end_timestamp = date_utils.get_datetime_utc_now()
-        liveaction_db.result = {'message': 'Action canceled by user.'}
         try:
-            LiveAction.add_or_update(liveaction_db)
+            (liveaction_db, execution_db) = action_service.request_cancellation(
+                liveaction_db, get_requester())
         except:
-            LOG.exception('Failed updating status to canceled for liveaction %s.',
-                          liveaction_db.id)
+            LOG.exception('Failed requesting cancellation for liveaction %s.', liveaction_db.id)
             abort(http_client.INTERNAL_SERVER_ERROR, 'Failed canceling execution.')
-            return
 
-        execution_db = execution_service.update_execution(liveaction_db)
         from_model_kwargs = self._get_from_model_kwargs_for_request(request=pecan.request)
+
         return ActionExecutionAPI.from_model(execution_db, from_model_kwargs)
 
     @jsexpose()

@@ -4,8 +4,447 @@ Changelog
 in development
 --------------
 
+* Passphrase support for the SSH runner. (improvement)
+* Improvements to ChatOps deployments of packs via ``pack deploy`` [Jon Middleton]
+* Add ``extra`` field to the ActionAlias schema for adapter-specific parameters. (improvement)
+* Dev environment by default now uses gunicorn to spin API and AUTH processes. (improvement)
+* Allow user to pass a boolean value for the ``cacert`` st2client constructor argument. This way
+  it now mimics the behavior of the ``verify`` argument of the ``requests.request`` method.
+  (improvement)
+* Add datastore access to Python runner actions via the ``action_service`` which is available
+  to all the Python runner actions after instantiation. (new-feature) #2396 #2511
+  [Kale Blankenship]
+* Update ``st2actions.runners.pythonrunner.Action`` class so the constructor also takes
+  ``action_service`` as the second argument.
+* Allow /v1/webhooks API endpoint request body to either be JSON or url encoded form data.
+  Request body type is determined and parsed accordingly based on the value of
+  ``Content-Type`` header.
+  Note: For backward compatibility reasons we default to JSON if ``Content-Type`` header is
+  not provided. #2473 [David Pitman]
+* Bug fixes to allow Sensors to have their own log files. #2487 [Andrew Regan]
+* Display number of seconds which have elapsed for all the executions which have completed
+  when using ``st2 execution get`` CLI command. (improvement)
+* Display number of seconds elapsed for all the child tasks of a workflow action when using
+  ``st2 execution get`` CLI command. (improvement)
+* Various improvements in the ``linux.wait_for_ssh`` action:
+
+  * Support for password based authentication.
+  * Support for non-RSA SSH keys.
+  * Support for providing a non-default (22) SSH server port.
+  * Support for using default system user (stanley) ssh key if neither ``password`` nor
+    ``keyfile`` parameter is provided.
+* Support for leading and trailing slashes in the webhook urls. (improvement)
+* Make sure that the ``filename``, ``module``, ``funcName`` and ``lineno`` attributes which are
+  available in the log formatter string contain the correct values. (bug-fix)
+
+  Reported by Andrew Regan.
+* Update ``matchregex`` rule criteria operator so it uses "dot all" mode where dot (``.``)
+  character will match any character including new lines. Previously ``*`` didn't match
+  new lines. (improvement)
+* Introduce new ``matchwildcard`` rule criteria operator. This operator provides supports for Unix
+  shell-style wildcards (``*``, ``?``). (new feature)
+* Allow user to pass ``verbose`` parameter to ``linux.rm`` action. For backward compatibility
+  reasons it defaults to ``true``. (improvement)
+* Make sure that sensor container child processes take into account ``--use-debugger`` flag passed
+  to the sensor container. This fixes support for remote debugging for sensor processes. (bug-fix)
+* Drop deprecated and unused ``system.admin_users`` config option which has been replaced with
+  RBAC.
+* Add ``--output`` and ``--existing-file`` options to ``st2-submit-debug-info``. [Kale Blankenship]
+* Move stream functionality from ``st2api`` into a new standalone ``st2stream`` service. Similar to
+  ``st2api`` and ``st2auth``, stream is now a standalone service and WSGI app. (improvement)
+* Allow user to specify a timezone in the CLI client config (``~/.st2/config``). If the timezone is
+  specified, all the timestamps displayed by the CLI will be shown in the configured timezone
+  instead of a default UTC display. (new feature)
+* Add ``attachments`` parameter to the ``core.sendmail`` action. (improvement) [Cody A. Ray]
+* Add ``--register-setup-virtualenvs`` flag to the ``register-content`` script and ``st2ctl``.
+  When this flag is provided, Python virtual environments are created for all the registered packs.
+  This option is to be used with distributed setup where action runner services run on multiple
+  hosts to ensure virtual environments exist on all those hosts. (new-feature)
+* Update ``core.st2.CronTimer`` so it supports more of the cron-like expressions (``a-b``, ``*/a``,
+  ``x,y,z``, etc.). (improvement)
+* Add new ``regex`` and ``iregex`` rule criteria operator and deprecate ``matchregex`` in favor of
+  those two new operators. (new-feature) [Jamie Evans]
+* Record failures to enforce rules due to missing actions or parameter validation errors. A
+  RuleEnforcement object will be created for failed enforcements that do not lead to an
+  ActionExecution creation. (improvement)
+* Add support for better serialization of the following parameter types for positional parameters
+  used in the local and remote script runner actions: ``integer``, ``float``, ``boolean``,
+  ``list``, ``object``. Previously those values were serialized as Python literals which made
+  parsing them in the shell scripts very cumbersome. Now they are serialized based on the simple
+  rules described in the documentation which makes it easy to use just by using simple shell
+  primitives such as if statements and ``IFS`` for lists. (improvement, new feature)
+* Fix ``linux.traceroute`` action. (bug fix)
+* Fix a bug with positional argument handling in the local script runner. Now the arguments with a
+  no value or value of ``None`` are correctly passed to the script. (bug fix)
+* Fix rule criteria comparison and make sure that falsy criteria pattern values such as integer
+  ``0`` are handled correctly. (bug-fix)
+
+  Reported by Igor Cherkaev.
+* Add ``-v`` flag (verbose mode) to the ``st2-run-pack-tests`` script. (improvement)
+* The list of required and optional configuration arguments for the LDAP auth backend has changed.
+  The LDAP auth backend supports other login name such as sAMAccountName. This requires a separate
+  service account for the LDAP backend to query for the DN related to the login name for bind to
+  validate the user password. Also, users must be in one or more groups specified in group_dns to
+  be granted access.
+* Mistral has deprecated the use of task name (i.e. ``$.task1``) to reference task result. It is
+  replaced with a ``task`` function that returns attributes of the task such as id, state, result,
+  and additional information (i.e. ``task(task1).result``).
+* Add support for additional SSH key exchange algorithms to the remote runner via upgrade to
+  paramiko 1.16.0. (new feature)
+* Add initial code framework for writing unit tests for action aliases. For the usage, please refer
+  to the "Pack Testing" documentation section. (new feature)
+* For consistency rename ``deploy_pack`` alias to ``pack_deploy``.
+* Fix alias executions API endpoint and make sure an exception is thrown if the user provided
+  command string doesn't match the provided format string. Previously, a non-match was silently
+  ignored. (bug fix)
+
+1.3.2 - February 12, 2016
+-------------------------
+
+* Remove get_open_ports action from Linux pack.
+
+1.3.1 - January 25, 2016
+------------------------
+
+* Make sure ``setup.py`` of ``st2client`` package doesn't rely on functionality which is only
+  available in newer versions of pip.
+* Fix an issue where trigger watcher cannot get messages from queue if multiple API processes
+  are spun up. Now each trigger watcher gets its own queue and therefore there are no locking
+  issues. (bug-fix)
+* Dev environment by default now uses gunicorn to spin API and AUTH processes. (improvement)
+* Allow user to pass a boolean value for the ``cacert`` st2client constructor argument. This way
+  it now mimics the behavior of the ``verify`` argument of the ``requests.request`` method.
+  (improvement)
+
+1.3.0 - January 22, 2016
+------------------------
+
+* Allow user to pass ``env`` parameter to ``packs.setup_virtualenv`` and ``packs.install``
+  action.
+
+  This comes handy if user wants pip to use an HTTP(s) proxy (HTTP_PROXY and HTTPS_PROXY
+  environment variable) when installing pack dependencies. (new feature)
+* Ability to view causation chains in Trace. This helps reduce the noise when using Trace to
+  identify specific issues. (new-feature)
+* Filter Trace components by model types to only view ActionExecutions, Rules or TriggerInstances.
+  (new-feature)
+* Include ref of the most meaningful object in each trace component. (new-feature)
+* Ability to hide trigger-instance that do not yield a rule enforcement. (new-feature)
+* Change the rule list columns in the CLI from ref, pack, description and enabled to ref,
+  trigger.ref, action.ref and enabled. This aligns closer the UI and also brings important
+  information front and center. (improvement)
+* Action and Trigger filters for rule list (new-feature)
+* Add missing logrotate config entry for ``st2auth`` service. #2294 [Vignesh Terafast]
+* Support for object already present in the DB for ``st2-rule-tester`` (improvement)
+* Add ``--register-fail-on-failure`` flag to ``st2-register-content`` script. If this flag is
+  provided, the script will fail and exit with non-zero status code if registering some resource
+  fails. (new feature)
+* Add a missing ``get_logger`` method to the `MockSensorService``. This method now returns an
+  instance of ``Mock`` class which allows user to assert that a particular message has been
+  logged. [Tim Ireland, Tomaz Muraus]
+* Introduce a new ``abandoned`` state that is applied to executions that we cannot guarantee as
+  completed. Typically happen when an actionrunner currently running some executions quits or is
+  killed via TERM.
+* Add new ``st2garbagecollector`` service which periodically deletes old data from the database
+  as configured in the config. By default, no old data is deleted unless explicitly configured in
+  the config.
+* All published variables can be available in the result of ActionChain execution under the
+  ``published`` property if ``display_published`` property is specified.
+* Allow user to specify TTL when creating datastore item using CLI with the ``--ttl`` option.
+  (improvement)
+* Fix validation error when None is passed explicitly to an optional argument on action
+  execution. (bug fix)
+* Deprecated ``params`` action attribute in the action chain definition in favor of the new
+  ``parameters`` attribute. (improvement)
+* Fix action parameters validation so that only a selected set of attributes can be overriden for
+  any runner parameters. (bug fix)
+* Fix type in the headers parameter for the http-request runner. (bug fix)
+* Fix runaway action triggers caused by state miscalculation for mistral workflow. (bug fix)
+* Throw a more friendly error message if casting parameter value fails because the value contains
+  an invalid type or similar. (improvement)
+* Use ``--always-copy`` option when creating virtualenv for packs from packs.setup_virtualenv
+  action. This is required when st2actionrunner is kicked off from python within a virtualenv.
+* Fix a bug in the remote script runner which would throw an exception if a remote script action
+  caused a top level failure (e.g. copying artifacts to a remote host failed). (bug-fix)
+* Display execution parameters when using ``st2 execution get <execution id>`` CLI command for
+  workflow executions. (improvement)
+* Fix execution cancellation for task of mistral workflow. (bug fix)
+* Fix runaway action triggers caused by state miscalculation for mistral workflow. (bug fix)
+* The ``--tasks`` option in the CLI for ``st2 execution get`` and ``st2 run`` will be renamed to
+  ``--show-tasks`` to avoid conflict with the tasks option in st2 execution re-run.
+* Add option to rerun one or more tasks in mistral workflow that has errored. (new-feature)
+* Fix a bug when removing notify section from an action meta and registering it never removed
+  the notify section from the db. (bug fix)
+* Make sure action specific short lived authentication token is deleted immediately when execution
+  is canceled. (improvement)
+* Ignore lock release errors which could occur while reopening log files. This error could simply
+  indicate that the lock was never acquired.
+* Replace ``chatops.format_result`` with ``chatops.format_execution_result`` and remove dependency
+  on st2 pack from st2contrib.
+* Trace also maintains causation chain through workflows.
+
+1.2.0 - December 07, 2015
+-------------------------
+
+* Refactor retries in the Mistral action runner to use exponential backoff. Configuration options
+  for Mistral have changed. (improvement)
+* Add SSH bastion host support to the paramiko SSH runner. Utilizes same connection parameters as
+  the targeted box. (new feature, improvement) #2144, #2150 [Logan Attwood]
+* Update action chain runner so it performs on-success and on-error task name validation during
+  pre_run time. This way common errors such as typos in the task names can be spotted early on
+  since there is no need to wait for the run time.
+* Change ``headers`` and ``params`` ``core.http`` action paramer type from ``string`` to
+  ``object``.
+* Don't allow action parameter ``type`` attribute to be an array since rest of the code doesn't
+  support parameters with multiple types. (improvement)
+* Fix trigger parameters validation for system triggers during rule creation - make sure we
+  validate the parameters before creating a TriggerDB object. (bug fix)
+* Update local runner so all the commands which are executed as a different user and result in
+  using sudo set $HOME variable to the home directory of the target user. (improvement)
+* Fix a bug with a user inside the context of the live action which was created using alias
+  execution endpoint incorrectly being set to the system user (``stanley``) instead of the
+  authenticated user which triggered the execution. (bug fix)
+* Include state_info for Mistral workflow and tasks in the action execution result. (improvement)
+* Introduce a new ``timeout`` action execution status which represents an action execution
+  timeout. Previously, executions which timed out had status set to ``failure``. Keep in mind
+  that timeout is just a special type of a failure. (new feature)
+* ``--debug`` flag no longer implies profiling mode. If you want to enable profiling mode, you need
+  to explicitly pass ``--profile`` flag to the binary. To reproduce the old behavior, simply pass
+  both flags to the binary - ``--debug --profile``.
+* Fix policy loading and registering - make sure we validate policy parameters against the
+  parameters schema when loading / registering policies. (bug fix, improvement)
+* Fix policy trigger for action execution cancellation. (bug fix)
+* Improve error reporting for static error in ActionChain definition e.g. incorrect reference
+  in default etc. (improvement)
+* Fix action chain so it doesn't end up in an infinite loop if an action which is part of the chain
+  is canceled. (bug fix)
+* Allow jinja templating to be used in ``message`` and ``data`` field for notifications.(new feature)
+* Add tools for purging executions (also, liveactions with it) and trigger instances older than
+  certain UTC timestamp from the db in bulk.
+* Fix json representation of trace in cli. (bug fix)
+* Introducing `noop` runner and `core.noop` action. Returns consistent success in a WF regardless of
+  user input. (new feature)
+* Add missing indexes on trigger_instance_d_b collection. (bug fix)
+* Add mock classes (``st2tests.mocks.*``) for easier unit testing of the packs. (new feature)
+* Add a script (``./st2common/bin/st2-run-pack-tests``) for running pack tests. (new feature)
+* Modify ActionAliasFormatParser to work with regular expressions and support more flexible parameter matching. (improvement)
+* Move ChatOps pack to st2 core.
+* Support for formatting of alias acknowledgement and result messages in AliasExecution. (new feature)
+* Support for "representation+value" format strings in aliases. (new feature)
+* Support for disabled result and acknowledgement messages in aliases. (new feature)
+* Add ability to write rule enforcement (models that represent a rule evaluation that resulted
+  in an action execution) to db to help debugging rules easier. Also, CLI bindings to list
+  and view these models are added. (new-feature)
+* Purge tool now uses delete_by_query and offloads delete to mongo and doesn't perform app side
+  explicit model deletion to improve speed. (improvement)
+
+1.1.1 - November 13, 2015
+-------------------------
+
+* Improve speed of ``st2 execution list`` command by not requesting ``result`` and
+  ``trigger_instance`` attributes. The effect of this change will be especially pronounced for
+  installations with a lot of large executions (large execution for this purpose is an execution
+  with a large result).
+* Improve speed of ``st2 execution get`` command by not requesting ``result`` and
+  ``trigger_instance`` attributes.
+* Now when running ``st2api`` service in debug mode (``--debug``) flag, all the JSON responses are
+  pretty indented.
+* When using ``st2 execution list`` and ``st2 execution get`` CLI commands, display execution
+  elapsed time in seconds for all the executions which are currently in "running" state.
+* Fix a race condition in sensor container where a sensor which takes <= 5 seconds to shut down
+  could be respawned before it exited. (bug fix) #2187 [Kale Blankenship]
+* Add missing entry for ``st2notifier`` service to the logrotate config. (bug fix)
+* Allow action parameter values who's type is ``object`` to contain special characters such as
+  ``.`` and ``$`` in the parameter value. (bug fix, improvement)
+* Allow user to specify URL which Mistral uses to talk to StackStorm API using ``mistral.api_url``
+  configuration option. If this option is not provided it defaults to the old behavior of using the
+  public API url (``auth.api_url`` setting). (improvement)
+
+1.1.0 - October 27, 2015
+------------------------
+
+* Add YAQL v1.0 support to Mistral. Earlier versions are deprecated. (improvement)
+* Update CLI so ``st2 run`` / ``st2 execution run`` and ``st2 execution re-run`` commands exit with
+  non-zero code if the action fails. (improvement)
+* Move st2auth service authentication backends to a "repo per backend" model. Backends are now also
+  dynamically discovered and registered which makes it possible to easily create and use custom
+  backends. For backward compatibility reasons, ``flat_file`` backend is installed And available by
+  default. (new feature, improvement)
+* New st2auth authentication backend for authenticating against LDAP servers -
+  https://github.com/StackStorm/st2-auth-backend-ldap. (new feature)
+* Default to rule being disabled if the user doesn't explicitly specify ``enabled`` attribute when
+  creating a rule via the API or inside the rule metadata file when registering local content
+  (previously it defaulted to enabled).
+* Fix ``timestamp_lt`` and ``timestamp_gt`` filtering in the `/executions` API endpoint. Now we
+  return a correct result which is expected from a user-perspective. (bug-fix)
+* Enable Mistral workflow cancellation via ``st2 execution cancel``. (improvement)
+* Make sure that alias execution endpoint returns a correct status code and error message if the
+  referenced action doesn't exist.
+* Allow action-alias to be created and deleted from CLI.
+* Allow user to select ``keystone`` backend in the st2auth service. (bug-fix)
+* Fix ``packs.info`` action so it correctly exists with a non-zero status code if the pack doesn't
+  exist or if it doesn't contain a valid ``.gitinfo`` file. (bug-fix)
+* Fix ``packs.info`` action so it correctly searches all the packs base dirs. (bug-fix)
+* Add support for ``--profile`` flag to all the services. When this flag is provided service runs
+  in the profiling module which means all the MongoDB queries and query related profile data is
+  logged. (new-feature)
+* Introduce API Keys that do not expire like Authentication tokens. This makes it easier to work
+  with webhook based integrations. (new-feature)
+* Allow user to define trigger tags in sensor definition YAML files. (new feature) #2000
+  [Tom Deckers]
+* Fix a bug in ``stdout`` and ``stderr`` consumption in paramiko SSH runner where reading a fixed
+  chunk byte array and decoding it could result in multi-byte UTF-8 character being read half way
+  resulting in UTF-8 decode error. This happens only when output is greater than default chunk size
+  (1024 bytes) and script produces utf-8 output. We now collect all the bytes from channel
+  and only then decode the byte stream as utf-8.
+* Update CLI so it supports caching tokens for different users (it creates a different file for each
+  user). This means you can now use ``ST2_CONFIG_FILE`` option without disabling token cache.
+  (improvement)
+* Cleanup timers and webhook trigger definitions once all rules referencing them are removed. (bug-fix)
+* Enable pseudo tty when running remote SSH commands with the paramiko SSH runner. This is done
+  to match existing Fabric behavior. (bug-fix)
+* Fix CLI so it skips automatic authentication if credentials are provided in the config on "auth"
+  command. (bug fix)
+* Strip the last '\r' or '\r\n' from both ``stdout`` and ``stderr`` streams from paramiko and local
+  runner output. This is done to be compatible with fabric output of those streams. (bug-fix)
+* Include parameters when viwewing output an execution on the CLI. (improvement)
+* CLI renders parameters and output as yaml for better readability. (improvement)
+* Set env variables (user provided and system assigned) before running remote command or script
+  action with paramiko. (bug-fix)
+* Fix a bug in Paramiko SSH runner where ``cwd`` could just be accessed in sudo mode but ``cd``
+  was outside scope of ``sudo`` in the command generated. Now, ``cd`` is inside the scope of
+  ``sudo``. (bug-fix)
+* Fix a bug in Paramiko SSH runner where kwargs keys in script arguments were not shell
+  injection safe. For example, kwarg key could contain spaces. (bug-fix)
+* Fix a bug in Paramiko SSH runner where JSON output in ``stdout`` or ``stderr`` wasn't transformed
+  to object automatically. (bug-fix)
+* Paramiko SSH runner no longer runs a remote command with ``sudo`` if local user and remote user
+  differ. (bug-fix)
+* Fix a bug with the CLI token precedence - now the auth token specified as an environment variable
+  or as a command line argument has precedence over credentials in the CLI config. (bug fix)
+* Support versioned APIs for auth controller. For backward compatibility, unversioned API calls
+  get redirected to versioned controllers by the server. (improvement)
+* Add option to verify SSL cert for HTTPS request to the core.http action. (new feature)
+* Update remote runner to include stdout and stderr which was consumed so far when a timeout
+  occurs. (improvement)
+* Fix st2-self-check script to check whether to use http/https when connecting to st2, to disable
+  Windows test by default, and to check test status correctly. (bug-fix)
+* Reduce the wait time between message consumption by TriggerWatcher to avoid latency (improvement)
+* Use exclusive messaging Qs for TriggerWatcher to avoid having to deal with old messages
+  and related migration scripts. (bug-fix)
+* Allow user to specify value for the ``From`` field in the ``sendmail`` action by passing ``from``
+  parameter to the action. (improvement)
+  [pixelrebel]
+* Allow user to update / reinstall Python dependencies listed in ``requirements.txt`` inside the
+  pack virtual environment by passing ``update=True`` parameter to ``packs.setup_virtualenv``
+  action or by using new ``packs.update_virtualenv`` action. (new feature)
+  [jsjeannotte]
+* Pack on install are now assigned an owner group. The ``pack_group`` property allows to pick this
+  value and default is ``st2packs``. (new feature)
+* Make sure sensor container child processes (sensor instance processes) are killed and cleaned up
+  if the sensor container is forcefully terminated (SIGKILL). (bug fix, improvement)
+
+0.13.2 - September 09, 2015
+---------------------------
+
+* Private_key supplied for remote_actions is now used to auth correctly. private_key argument
+  should be the contents of private key file (of user specified in username argument). (bug-fix)
+* Last newline character ('\n') is now stripped from ``stdout`` and ``stderr`` fields in local
+  and remote command/shell runners. (improvement)
+* Fix sensor container service so the ``config`` argument is correctly passed to the sensor
+  instances in the system packs. Previously, this argument didn't get passed correctly to the
+  FileWatchSensor from the system linux pack. (bug-fix)
+* Make sure sensor processes correctly pick up parent ``--debug`` flag. This makes debugging a lot
+  easier since user simply needs to start sensor container with ``--debug`` flag and all the sensor
+  logs with level debug or higher will be routed to the container log. (improvement)
+
+0.13.2 - September 09, 2015
+---------------------------
+
+* ``private_key`` supplied for remote_actions is now used to auth correctly.
+  ``private_key`` argument should be the contents of private key file (of user specified in username argument). (bug-fix)
+* Last newline character ('\n') is now stripped from ``stdout`` and ``stderr`` fields in
+  local and remote command/shell runners. (improvement)
+* Fix sensor container service so the ``config`` argument is correctly passed to the sensor
+  instances in the system packs. Previously, this argument didn't get passed correctly to
+  the FileWatchSensor from the system linux pack. (bug-fix)
+* Make sure sensor processes correctly pick up parent ``--debug`` flag. This makes
+  debugging a lot easier since user simply needs to start sensor container with ``--debug``
+  flag and all the sensor logs with level debug or higher will be routed to the container
+  log. (improvement)
+
+0.13.1 - August 28, 2015
+------------------------
+
+* cwd for paramiko script runner should use cwd provided as runner parameter. (bug-fix)
+* Fix timer regression; bring brake broken timers. (bug-fix)
+* Updates to trace objects are done via non-upsert updates by adding to the array. This
+  makes it safer to update trace objects from multiple processes. (bug-fix)
+
+0.13.0 - August 24, 2015
+------------------------
+
 * Add new OpenStack Keystone authentication backend.
   [Itxaka Serrano]
+* Information about parent workflow is now a dict in child's context field. (improvement)
+* Fix a bug when some runner parameter default values where not overridden when a
+  falsey value was used in the action metadata parameter override (e.g. False, 0).
+  [Eugen C.]
+* Correctly return 404 if user requests an invalid path which partially maps to an existing
+  path. (bug-fix)
+* Add support for restarting sensors which exit with a non-zero status code to
+  the sensor container. Sensor container will now automatically try to restart
+  (up to 2 times) sensor processes which die with a non-zero status code. (improvement)
+* Support for RabbitMQ cluster. StackStorm works with a RabbitMQ cluster and switches
+  nodes on failover. (feature)
+* Add index to the ActionExecution model to speed up query. (improvement)
+* Fix sort key in the ActionExecution API controller. (bug-fix)
+* Introduce a Paramiko SSH runner that uses eventlets to run scripts or commands in parallel. (improvement) (experimental)
+* Add action parameters validation to Mistral workflow on invocation. (improvement)
+* Fix key name for error message in liveaction result. (bug-fix)
+* Fix 500 API response when rule with no pack info is supplied. (bug-fix)
+* Fix bug in trigger-instance re-emit (extra kwargs passed to manager is now handled). (bug-fix)
+* Rename notification "channels" to "routes". (improvement)
+* Make sure auth hook and middleware returns JSON and "Content-Type: application/json" header
+  in every response. (improvement, bug-fix)
+* Fix bug in triggers emitted on key value pair changes and sensor spawn/exit. When
+  dispatching those triggers, the reference used didn't contain the pack names
+  which meant it was invalid and lookups in the rules engine would fail. (bug-fix)
+* Allow user to include files which are written on disk inside the action create API payload.
+  (new feature)
+* Allow user to retrieve content of a file inside a pack by using the new
+  ``/packs/views/files/`` API endpoint. (new feature)
+* Handle sudo in paramiko remote script runner. (bug-fix)
+* Turn on paramiko ssh runner as the default ssh runner in prod configuration.
+  To switch to fabric runner, set ``use_paramiko_ssh_runner`` to false in st2.conf. (improvement)
+* Add OpenStack Keystone authentication configuration for Mistral. (improvement)
+* Abiltiy to add trace tag to TriggerInstance from Sensor. (feature)
+* Ability to view trace in CLI with list and get commands. (feature)
+* Add ability to add trace tag to ``st2 run`` CLI command. (feature)
+* Add ability to specify trace id in ``st2 run`` CLI command. (feature)
+* Update ``st2ctl`` to correctly start ``st2web`` even if even if Mistral is no installed.
+  (bug-fix, improvement)
+* Add X-Request-ID header to all API calls for easier debugging. (improvement)
+* Add new CLI commands for disabling and enabling content pack resources
+  (``{sensor,action,rule} {enable, disable} <ref or id>``) (feature)
+* Fix a bug in handling positional arguments with spaces. (bug-fix)
+* Make sure that the ``$PATH`` environment variable which is set for the sandboxed Python
+  process contains "<virtualenv path>/bin" directory as the first entry. (bug fix)
+
+0.12.2 - August 11, 2015
+------------------------
+
+* Support local ssh config file in remote runners. (feature)
+* Changes to htpasswd file used in `flat_file` auth backend do not require
+  a restart of st2auth and consequently StackStorm. (feature)
+
+0.12.1 - July 31, 2015
+----------------------
+
+* Un-registering a pack also removes ``rules`` and ``action aliases`` from the pack. (bug-fix)
+* Disable parallel SSH in fabric runner which causes issues with eventlets. (bug-fix)
+* Fix executions stuck in ``running`` state if runner container throws exception. (bug-fix)
+* Fix cases where liveaction result in dict are escaped and passed to Mistral. (bug-fix)
 
 0.12.0 - July 20, 2015
 ----------------------
@@ -47,6 +486,18 @@ in development
 * Move /exp/actionalias/ and /exp/aliasexecution to /v1/actionalias/ and /v1/aliasexecution/
   respectively. (upgrade)
 * Display friendly message for error in parameters validation on action execution. (improvement)
+
+0.11.6 - July 2, 2015
+---------------------
+
+* Update all the code to handle all the datetime objects internally in UTC. (improvement, bug-fix)
+
+0.11.5 - July 1, 2015
+---------------------
+
+* Fix a bug where ``end_timestamp`` is not captured for Mistral workflow executions (bug-fix)
+* Fix a bug where the CLI failed to display Mistral workflow that errored (bug-fix)
+* Fix a bug where the published variables is not captured in the Mistral workflow result (bug-fix)
 
 0.11.4 - June 30, 2015
 ----------------------
@@ -305,6 +756,7 @@ Docs: http://docks.stackstorm.com/0.7/
 * st2api only requires st2common and dependencies defined in requirements to be available on the
   pythonpath thus making it possible to run st2api standalone.
 * Add support for 'exists' and 'nexists' operators in rule criteria. (new-feature)
+* Change default mode for authentication to standalone. (refactor)
 
 v0.6.0 - December 8, 2014
 -------------------------

@@ -20,15 +20,52 @@ import argparse
 from st2common import log as logging
 from st2actions import config
 from st2actions.runners.pythonrunner import Action
+from st2actions.runners.utils import get_logger_for_python_runner_action
+from st2actions.runners.utils import get_action_class_instance
 from st2common.util import loader as action_loader
 from st2common.util.config_parser import ContentPackConfigParser
 from st2common.constants.action import ACTION_OUTPUT_RESULT_DELIMITER
+from st2common.service_setup import db_setup
+from st2common.services.datastore import DatastoreService
 
 __all__ = [
-    'PythonActionWrapper'
+    'PythonActionWrapper',
+    'ActionService'
 ]
 
 LOG = logging.getLogger(__name__)
+
+
+class ActionService(object):
+    """
+    Instance of this class is passed to the action instance and exposes "public"
+    methods which can be called by the action.
+    """
+
+    def __init__(self, action_wrapper):
+        logger = get_logger_for_python_runner_action(action_name=action_wrapper._class_name)
+
+        self._action_wrapper = action_wrapper
+        self._datastore_service = DatastoreService(logger=logger,
+                                                   pack_name=self._action_wrapper._pack,
+                                                   class_name=self._action_wrapper._class_name,
+                                                   api_username='action_service')
+
+    ##################################
+    # Methods for datastore management
+    ##################################
+
+    def list_values(self, local=True, prefix=None):
+        return self._datastore_service.list_values(local, prefix)
+
+    def get_value(self, name, local=True):
+        return self._datastore_service.get_value(name, local)
+
+    def set_value(self, name, value, ttl=None, local=True):
+        return self._datastore_service.set_value(name, value, ttl, local)
+
+    def delete_value(self, name, local=True):
+        return self._datastore_service.delete_value(name, local)
 
 
 class PythonActionWrapper(object):
@@ -46,15 +83,20 @@ class PythonActionWrapper(object):
         :param parent_args: Command line arguments passed to the parent process.
         :type parse_args: ``list``
         """
+
         self._pack = pack
         self._file_path = file_path
         self._parameters = parameters or {}
         self._parent_args = parent_args or []
+        self._class_name = None
+        self._logger = logging.getLogger('PythonActionWrapper')
 
         try:
             config.parse_args(args=self._parent_args)
         except Exception:
             pass
+        else:
+            db_setup()
 
     def run(self):
         action = self._get_action_instance()
@@ -84,11 +126,16 @@ class PythonActionWrapper(object):
         if config:
             LOG.info('Using config "%s" for action "%s"' % (config.file_path,
                                                             self._file_path))
-
-            return action_cls(config=config.config)
+            config = config.config
         else:
             LOG.info('No config found for action "%s"' % (self._file_path))
-            return action_cls(config={})
+            config = None
+
+        action_service = ActionService(action_wrapper=self)
+        action_instance = get_action_class_instance(action_cls=action_cls,
+                                                    config=config,
+                                                    action_service=action_service)
+        return action_instance
 
 
 if __name__ == '__main__':
@@ -106,6 +153,7 @@ if __name__ == '__main__':
     parameters = args.parameters
     parameters = json.loads(parameters) if parameters else {}
     parent_args = json.loads(args.parent_args) if args.parent_args else []
+
     assert isinstance(parent_args, list)
 
     obj = PythonActionWrapper(pack=args.pack,

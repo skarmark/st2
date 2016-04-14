@@ -32,7 +32,7 @@ class HTTPRunnerTestCase(unittest2.TestCase):
 
     @mock.patch('st2actions.runners.httprunner.requests')
     def test_parse_response_body(self, mock_requests):
-        client = HTTPClient(url='http://localhost')
+        client = HTTPClient(url='http://127.0.0.1')
         mock_result = MockResult()
 
         # Unknown content type, body should be returned raw
@@ -85,3 +85,43 @@ class HTTPRunnerTestCase(unittest2.TestCase):
 
         self.assertFalse(isinstance(result['body'], dict))
         self.assertEqual(result['body'], mock_result.text)
+
+    @mock.patch('st2actions.runners.httprunner.requests')
+    def test_https_verify(self, mock_requests):
+        url = 'https://127.0.0.1:8888'
+        client = HTTPClient(url=url, verify=True)
+        mock_result = MockResult()
+
+        mock_result.text = 'foo bar ponies'
+        mock_result.headers = {'Content-Type': 'text/html'}
+        mock_result.status_code = 200
+
+        mock_requests.request.return_value = mock_result
+        client.run()
+
+        self.assertTrue(client.verify)
+
+        mock_requests.request.assert_called_with(
+            'GET', url, allow_redirects=False, auth=None, cookies=None,
+            data='', files=None, headers={}, params=None, proxies=None,
+            timeout=60, verify=True)
+
+    @mock.patch('st2actions.runners.httprunner.requests')
+    def test_https_verify_false(self, mock_requests):
+        url = 'https://127.0.0.1:8888'
+        client = HTTPClient(url=url)
+        mock_result = MockResult()
+
+        mock_result.text = 'foo bar ponies'
+        mock_result.headers = {'Content-Type': 'text/html'}
+        mock_result.status_code = 200
+
+        mock_requests.request.return_value = mock_result
+        client.run()
+
+        self.assertFalse(client.verify)
+
+        mock_requests.request.assert_called_with(
+            'GET', url, allow_redirects=False, auth=None, cookies=None,
+            data='', files=None, headers={}, params=None, proxies=None,
+            timeout=60, verify=False)

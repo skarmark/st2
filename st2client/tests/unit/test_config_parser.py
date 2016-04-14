@@ -43,23 +43,25 @@ class CLIConfigParserTestCase(unittest2.TestCase):
         # File exists - all the options specified
         expected = {
             'general': {
-                'base_url': 'http://localhost',
+                'base_url': 'http://127.0.0.1',
                 'api_version': 'v1',
-                'cacert': 'cacartpath'
+                'cacert': 'cacartpath',
+                'silence_ssl_warnings': False
             },
             'cli': {
                 'debug': True,
-                'cache_token': False
+                'cache_token': False,
+                'timezone': 'UTC'
             },
             'credentials': {
                 'username': 'test1',
                 'password': 'test1'
             },
             'api': {
-                'url': 'http://localhost:9101/v1'
+                'url': 'http://127.0.0.1:9101/v1'
             },
             'auth': {
-                'url': 'http://localhost:9100/'
+                'url': 'http://127.0.0.1:9100/'
             }
         }
         parser = CLIConfigParser(config_file_path=CONFIG_FILE_PATH_FULL,

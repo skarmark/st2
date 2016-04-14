@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# pylint: disable=not-context-manager
 
 import os
 import pwd
@@ -41,7 +42,6 @@ __all__ = [
     'ShellScriptAction',
     'RemoteAction',
     'RemoteScriptAction',
-    'ParamikoSSHCommandAction',
     'FabricRemoteAction',
     'FabricRemoteScriptAction',
     'ResolvedActionParameters'
@@ -51,8 +51,21 @@ LOG = logging.getLogger(__name__)
 
 LOGGED_USER_USERNAME = pwd.getpwuid(os.getuid())[0]
 
+# Flags which are passed to every sudo invocation
+SUDO_COMMON_OPTIONS = [
+    '-E'  # we want to preserve the environment of the user which ran sudo
+]
+
+# Flags which are only passed to sudo when not running as current user and when
+# -u flag is used
+SUDO_DIFFERENT_USER_OPTIONS = [
+    '-H'  # we want $HOME to reflect the home directory of the requested / target user
+]
+
 
 class ShellCommandAction(object):
+    EXPORT_CMD = 'export'
+
     def __init__(self, name, action_exec_id, command, user, env_vars=None, sudo=False,
                  timeout=None, cwd=None):
         self.name = name
@@ -65,21 +78,63 @@ class ShellCommandAction(object):
         self.cwd = cwd
 
     def get_full_command_string(self):
-        # Note: We pass -E to sudo because we want to preserve user provided
-        # environment variables
+        # Note: We pass -E to sudo because we want to preserve user provided environment variables
         if self.sudo:
             command = quote_unix(self.command)
-            command = 'sudo -E -- bash -c %s' % (command)
+            sudo_arguments = ' '.join(self._get_common_sudo_arguments())
+            command = 'sudo %s -- bash -c %s' % (sudo_arguments, command)
         else:
             if self.user and self.user != LOGGED_USER_USERNAME:
-                # Need to use sudo to run as a different user
+                # Need to use sudo to run as a different (requested) user
                 user = quote_unix(self.user)
+                sudo_arguments = ' '.join(self._get_user_sudo_arguments(user=user))
                 command = quote_unix(self.command)
-                command = 'sudo -E -u %s -- bash -c %s' % (user, command)
+                command = 'sudo %s -- bash -c %s' % (sudo_arguments, command)
             else:
                 command = self.command
 
         return command
+
+    def get_timeout(self):
+        return self.timeout
+
+    def get_cwd(self):
+        return self.cwd
+
+    def _get_common_sudo_arguments(self):
+        """
+        Retrieve a list of flags which are passed to sudo on every invocation.
+
+        :rtype: ``list``
+        """
+        flags = copy.copy(SUDO_COMMON_OPTIONS)
+        return flags
+
+    def _get_user_sudo_arguments(self, user):
+        """
+        Retrieve a list of flags which are passed to sudo when running as a different user and "-u"
+        flag is used.
+
+        :rtype: ``list``
+        """
+        flags = self._get_common_sudo_arguments()
+        flags += copy.copy(SUDO_DIFFERENT_USER_OPTIONS)
+        flags += ['-u', user]
+        return flags
+
+    def _get_env_vars_export_string(self):
+        if self.env_vars:
+            # Envrionment variables could contain spaces and open us to shell
+            # injection attacks. Always quote the key and the value.
+            exports = ' '.join(
+                '%s=%s' % (quote_unix(k), quote_unix(v))
+                for k, v in self.env_vars.iteritems()
+            )
+            shell_env_str = '%s %s' % (ShellCommandAction.EXPORT_CMD, exports)
+        else:
+            shell_env_str = ''
+
+        return shell_env_str
 
     def _get_command_string(self, cmd, args):
         """
@@ -139,16 +194,19 @@ class ShellScriptAction(ShellCommandAction):
         self.positional_args = positional_args
 
     def get_full_command_string(self):
+        return self._format_command()
+
+    def _format_command(self):
         script_arguments = self._get_script_arguments(named_args=self.named_args,
                                                       positional_args=self.positional_args)
-
         if self.sudo:
             if script_arguments:
                 command = quote_unix('%s %s' % (self.script_local_path_abs, script_arguments))
             else:
                 command = quote_unix(self.script_local_path_abs)
 
-            command = 'sudo -E -- bash -c %s' % (command)
+            sudo_arguments = ' '.join(self._get_common_sudo_arguments())
+            command = 'sudo %s -- bash -c %s' % (sudo_arguments, command)
         else:
             if self.user and self.user != LOGGED_USER_USERNAME:
                 # Need to use sudo to run as a different user
@@ -159,7 +217,8 @@ class ShellScriptAction(ShellCommandAction):
                 else:
                     command = quote_unix(self.script_local_path_abs)
 
-                command = 'sudo -E -u %s -- bash -c %s' % (user, command)
+                sudo_arguments = ' '.join(self._get_user_sudo_arguments(user=user))
+                command = 'sudo %s -- bash -c %s' % (sudo_arguments, command)
             else:
                 script_path = quote_unix(self.script_local_path_abs)
 
@@ -167,7 +226,6 @@ class ShellScriptAction(ShellCommandAction):
                     command = '%s %s' % (script_path, script_arguments)
                 else:
                     command = script_path
-
         return command
 
     def _get_script_arguments(self, named_args=None, positional_args=None):
@@ -196,23 +254,26 @@ class ShellScriptAction(ShellCommandAction):
                     if value is True:
                         command_parts.append(arg)
                 else:
-                    command_parts.append('%s=%s' % (arg, quote_unix(str(value))))
+                    command_parts.append('%s=%s' % (quote_unix(arg), quote_unix(str(value))))
 
         # add the positional args
         if positional_args:
-            command_parts.append(positional_args)
+            quoted_pos_args = [quote_unix(pos_arg) for pos_arg in positional_args]
+            pos_args_string = ' '.join(quoted_pos_args)
+            command_parts.append(pos_args_string)
         return ' '.join(command_parts)
 
 
 class SSHCommandAction(ShellCommandAction):
     def __init__(self, name, action_exec_id, command, env_vars, user, password=None, pkey=None,
-                 hosts=None, parallel=True, sudo=False, timeout=None, cwd=None):
+                 hosts=None, parallel=True, sudo=False, timeout=None, cwd=None, passphrase=None):
         super(SSHCommandAction, self).__init__(name=name, action_exec_id=action_exec_id,
                                                command=command, env_vars=env_vars, user=user,
                                                sudo=sudo, timeout=timeout, cwd=cwd)
         self.hosts = hosts
         self.parallel = parallel
         self.pkey = pkey
+        self.passphrase = passphrase
         self.password = password
 
     def is_parallel(self):
@@ -254,13 +315,14 @@ class SSHCommandAction(ShellCommandAction):
 class RemoteAction(SSHCommandAction):
     def __init__(self, name, action_exec_id, command, env_vars=None, on_behalf_user=None,
                  user=None, password=None, private_key=None, hosts=None, parallel=True, sudo=False,
-                 timeout=None, cwd=None):
+                 timeout=None, cwd=None, passphrase=None):
         super(RemoteAction, self).__init__(name=name, action_exec_id=action_exec_id,
                                            command=command, env_vars=env_vars, user=user,
                                            hosts=hosts, parallel=parallel, sudo=sudo,
-                                           timeout=timeout, cwd=cwd)
+                                           timeout=timeout, cwd=cwd, passphrase=passphrase)
         self.password = password
         self.private_key = private_key
+        self.passphrase = passphrase
         self.on_behalf_user = on_behalf_user  # Used for audit purposes.
         self.timeout = timeout
 
@@ -277,6 +339,7 @@ class RemoteAction(SSHCommandAction):
         str_rep.append('sudo: %s' % str(self.sudo))
         str_rep.append('parallel: %s' % str(self.parallel))
         str_rep.append('hosts: %s)' % str(self.hosts))
+        str_rep.append('timeout: %s)' % str(self.timeout))
 
         return ', '.join(str_rep)
 
@@ -304,6 +367,21 @@ class RemoteScriptAction(ShellScriptAction):
         self.parallel = parallel
         self.command = self._format_command()
         LOG.debug('RemoteScriptAction: command to run on remote box: %s', self.command)
+
+    def get_remote_script_abs_path(self):
+        return self.remote_script
+
+    def get_local_script_abs_path(self):
+        return self.script_local_path_abs
+
+    def get_remote_libs_path_abs(self):
+        return self.remote_libs_path_abs
+
+    def get_local_libs_path_abs(self):
+        return self.script_local_libs_path_abs
+
+    def get_remote_base_dir(self):
+        return self.remote_dir
 
     def _format_command(self):
         script_arguments = self._get_script_arguments(named_args=self.named_args,
@@ -333,10 +411,6 @@ class RemoteScriptAction(ShellScriptAction):
         str_rep.append('hosts: %s)' % self.hosts)
 
         return ', '.join(str_rep)
-
-
-class ParamikoSSHCommandAction(SSHCommandAction):
-    pass
 
 
 class FabricRemoteAction(RemoteAction):

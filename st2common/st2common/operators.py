@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import re
+import fnmatch
 
 from st2common.util import date as date_utils
 
@@ -113,12 +114,36 @@ def greater_than(value, criteria_pattern):
     return value > criteria_pattern
 
 
+def match_wildcard(value, criteria_pattern):
+    if criteria_pattern is None:
+        return False
+
+    return fnmatch.fnmatch(value, criteria_pattern)
+
+
 def match_regex(value, criteria_pattern):
+    # match_regex is deprecated, please use 'regex' and 'iregex'
+    if criteria_pattern is None:
+        return False
+    regex = re.compile(criteria_pattern, re.DOTALL)
+    # check for a match and not for details of the match.
+    return regex.match(value) is not None
+
+
+def regex(value, criteria_pattern):
     if criteria_pattern is None:
         return False
     regex = re.compile(criteria_pattern)
     # check for a match and not for details of the match.
-    return regex.match(value) is not None
+    return regex.search(value) is not None
+
+
+def iregex(value, criteria_pattern):
+    if criteria_pattern is None:
+        return False
+    regex = re.compile(criteria_pattern, re.IGNORECASE)
+    # check for a match and not for details of the match.
+    return regex.search(value) is not None
 
 
 def _timediff(diff_target, period_seconds, operator):
@@ -161,7 +186,10 @@ def nexists(value, criteria_pattern):
     return value is None
 
 # operator match strings
+MATCH_WILDCARD = 'matchwildcard'
 MATCH_REGEX = 'matchregex'
+REGEX = 'regex'
+IREGEX = 'iregex'
 EQUALS_SHORT = 'eq'
 EQUALS_LONG = 'equals'
 NEQUALS_LONG = 'nequals'
@@ -189,7 +217,10 @@ KEY_NOT_EXISTS = 'nexists'
 
 # operator lookups
 operators = {
+    MATCH_WILDCARD: match_wildcard,
     MATCH_REGEX: match_regex,
+    REGEX: regex,
+    IREGEX: iregex,
     EQUALS_SHORT: equals,
     EQUALS_LONG: equals,
     NEQUALS_SHORT: nequals,

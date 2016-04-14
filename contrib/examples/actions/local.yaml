@@ -5,9 +5,9 @@ entry_point: ''
 name: local-notify
 notify:
   on-complete:
-    channels:
+    routes:
     - slack
-    message: '"@channel: Action succeeded."'
+    message: '"@channel: Action run by {{action_context.user}} succeeded. Cmd run was {{cmd}}."'
 parameters:
   cmd:
     description: Arbitrary Linux command to be executed on the remote host(s).

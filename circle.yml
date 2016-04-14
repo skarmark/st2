@@ -1,0 +1,51 @@
+# Setup in CircleCI account the following ENV variables:
+# IS_PRODUCTION (default: 0)
+# IS_ENTERPRISE (default: 0)
+# PACKAGECLOUD_ORGANIZATION (default: stackstorm)
+# PACKAGECLOUD_TOKEN
+# DOCKER_USER
+# DOCKER_EMAIL
+# DOCKER_PASSWORD
+
+general:
+  # Don't run CI for PR, only for major branches.
+  # Remove travis and enable per PR at the same time.
+  branches:
+    only:
+      - master
+      - /v[0-9]+\.[0-9]+/
+
+notify:
+  webhooks:
+    - url: https://webhooks.stackstorm.net:8531/webhooks/build/events
+
+machine:
+  environment:
+    ST2_REPO_ROOT_DIR: ${HOME}/${CIRCLE_PROJECT_REPONAME}
+    BUILD_DOCKER: 0
+  services:
+    - docker
+    - mongodb
+    - postgresql
+    - rabbitmq-server
+
+dependencies:
+  cache_directories:
+    - ~/.cache/pip
+  pre:
+    - sudo .circle/configure-services.sh
+    - sudo .circle/add-itest-user.sh
+    - sudo apt-get -y install parallel jq
+  post:
+    - cd ${ST2_REPO_ROOT_DIR} && hostname && make compile requirements
+test:
+  override:
+    - case $CIRCLE_NODE_INDEX in 0) cd ${ST2_REPO_ROOT_DIR} && make .flake8 .pylint ;; 1) cd ${ST2_REPO_ROOT_DIR} && make .unit-tests-coverage-html clean ;; 2) cd ${ST2_REPO_ROOT_DIR} && make .itests-coverage-html clean ;; esac:
+        parallel: true
+
+experimental:
+  notify:
+    branches:
+      only:
+        - master
+        - /v[0-9]+\.[0-9]+/

@@ -2,6 +2,9 @@
 *.sqlite
 *.swp
 *.log
+*/requirements.txt
+!st2client/requirements.txt
+.stamp*
 
 # C extensions
 *.so
@@ -36,4 +39,8 @@ nosetests.xml
 .idea
 .DS_Store
 ._*
+
+# Editor Saves
+*~
+\#*\#
 

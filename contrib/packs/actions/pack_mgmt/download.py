@@ -17,12 +17,14 @@ import os
 import shutil
 import hashlib
 import json
+import stat
 
 import six
 from git.repo import Repo
 from lockfile import LockFile
 
 from st2actions.runners.pythonrunner import Action
+from st2common.util.green import shell
 
 ALL_PACKS = '*'
 PACK_REPO_ROOT = 'packs'
@@ -55,9 +57,12 @@ STACKSTORM_CONTRIB_REPOS = [
 #####
 
 
+PACK_GROUP_CFG_KEY = 'pack_group'
+
+
 class DownloadGitRepoAction(Action):
-    def __init__(self, config=None):
-        super(DownloadGitRepoAction, self).__init__(config=config)
+    def __init__(self, config=None, action_service=None):
+        super(DownloadGitRepoAction, self).__init__(config=config, action_service=action_service)
         self._subtree = None
         self._repo_url = None
 
@@ -143,11 +148,34 @@ class DownloadGitRepoAction(Action):
 
                 self.logger.debug('Moving pack from %s to %s.', abs_pack_temp_location, to)
                 shutil.move(abs_pack_temp_location, to)
+                # post move fix all permissions.
+                self._apply_pack_permissions(pack_path=dest_pack_path)
                 message = 'Success.'
             elif message:
                 message = 'Failure : %s' % message
             result[pack] = (desired, message)
         return result
+
+    def _apply_pack_permissions(self, pack_path):
+        """
+        Will recursively apply permission 770 to pack and its contents.
+        """
+        # 1. switch owner group to configuered group
+        pack_group = self.config.get(PACK_GROUP_CFG_KEY, None)
+        if pack_group:
+            shell.run_command(['sudo', 'chgrp', '-R', pack_group, pack_path])
+
+        # 2. Setup the right permissions and group ownership
+        # These mask is same as mode = 775
+        mode = stat.S_IRWXU | stat.S_IRWXG | stat.S_IROTH | stat.S_IXOTH
+        os.chmod(pack_path, mode)
+
+        # Yuck! Since os.chmod does not support chmod -R walk manually.
+        for root, dirs, files in os.walk(pack_path):
+            for d in dirs:
+                os.chmod(os.path.join(root, d), mode)
+            for f in files:
+                os.chmod(os.path.join(root, f), mode)
 
     @staticmethod
     def _is_desired_pack(abs_pack_path, pack_name):

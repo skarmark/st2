@@ -16,6 +16,7 @@
 import six
 
 from mongoengine import ValidationError
+from mongoengine import NotUniqueError
 from oslo_config import cfg
 
 from st2common import log as logging
@@ -31,7 +32,13 @@ LOG = logging.getLogger(__name__)
 
 
 def _register_internal_trigger_type(trigger_definition):
-    trigger_type_db = create_trigger_type_db(trigger_type=trigger_definition)
+    try:
+        trigger_type_db = create_trigger_type_db(trigger_type=trigger_definition)
+    except (NotUniqueError, StackStormDBObjectConflictError):
+        # We ignore conflict error since this operation is idempodent and race is not an
+        # issue
+        LOG.debug('Trigger type "%s" already exists, ignoring...' %
+                  (trigger_definition['name']), exc_info=True)
 
     # trigger types with parameters do no require a shadow trigger.
     if not trigger_type_db.parameters_schema:
@@ -42,12 +49,12 @@ def _register_internal_trigger_type(trigger_definition):
             extra = {'trigger_db': trigger_db}
             LOG.audit('Trigger created for parameter-less TriggerType. Trigger.id=%s' %
                       (trigger_db.id), extra=extra)
+        except StackStormDBObjectConflictError:
+            LOG.debug('Shadow trigger "%s" already exists. Ignoring.',
+                      trigger_type_db.get_reference().ref, exc_info=True)
+
         except (ValidationError, ValueError):
             LOG.exception('Validation failed in shadow trigger. TriggerType=%s.',
-                          trigger_type_db.get_reference().ref)
-            raise
-        except StackStormDBObjectConflictError:
-            LOG.exception('Shadow trigger creation of "%s" failed with uniqueness conflict.',
                           trigger_type_db.get_reference().ref)
             raise
 
@@ -71,8 +78,13 @@ def register_internal_trigger_types():
             is_action_trigger = trigger_definition['name'] == ACTION_SENSOR_TRIGGER['name']
             if is_action_trigger and not action_sensor_enabled:
                 continue
-
-            trigger_type_db = _register_internal_trigger_type(trigger_definition=trigger_definition)
-            registered_trigger_types_db.append(trigger_type_db)
+            try:
+                trigger_type_db = _register_internal_trigger_type(
+                    trigger_definition=trigger_definition)
+            except Exception:
+                LOG.exception('Failed registering internal trigger: %s.', trigger_definition)
+                raise
+            else:
+                registered_trigger_types_db.append(trigger_type_db)
 
     return registered_trigger_types_db

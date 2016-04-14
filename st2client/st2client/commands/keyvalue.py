@@ -23,7 +23,7 @@ from st2client.commands.noop import NoopCommand
 from st2client.commands.resource import add_auth_token_to_kwargs_from_cli
 from st2client.formatters import table
 from st2client.models.keyvalue import KeyValuePair
-from st2client.utils.date import format_isodate
+from st2client.utils.date import format_isodate_for_user_timezone
 
 LOG = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class KeyValuePairBranch(resource.ResourceBranch):
 class KeyValuePairListCommand(resource.ResourceListCommand):
     display_attributes = ['name', 'value', 'expire_timestamp']
     attribute_transform_functions = {
-        'expire_timestamp': format_isodate,
+        'expire_timestamp': format_isodate_for_user_timezone,
     }
 
     def __init__(self, *args, **kwargs):
@@ -82,11 +82,11 @@ class KeyValuePairListCommand(resource.ResourceListCommand):
 
 class KeyValuePairGetCommand(resource.ResourceGetCommand):
     pk_argument_name = 'name'
-    display_attributes = ['name', 'value']
+    display_attributes = ['name', 'value', 'expire_timestamp']
 
 
 class KeyValuePairSetCommand(resource.ResourceCommand):
-    display_attributes = ['name', 'value']
+    display_attributes = ['name', 'value', 'expire_timestamp']
 
     def __init__(self, resource, *args, **kwargs):
         super(KeyValuePairSetCommand, self).__init__(
@@ -99,6 +99,8 @@ class KeyValuePairSetCommand(resource.ResourceCommand):
                                  metavar='name',
                                  help='Name of the key value pair.')
         self.parser.add_argument('value', help='Value paired with the key.')
+        self.parser.add_argument('-l', '--ttl', dest='ttl', type=int, default=None,
+                                 help='TTL (in seconds) for this value.')
 
     @add_auth_token_to_kwargs_from_cli
     def run(self, args, **kwargs):
@@ -106,6 +108,10 @@ class KeyValuePairSetCommand(resource.ResourceCommand):
         instance.id = args.name  # TODO: refactor and get rid of id
         instance.name = args.name
         instance.value = args.value
+
+        if args.ttl:
+            instance.ttl = args.ttl
+
         return self.manager.update(instance, **kwargs)
 
     def run_and_print(self, args, **kwargs):

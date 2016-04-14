@@ -18,12 +18,21 @@ import traceback
 import uuid
 import datetime
 
+from jsonschema import exceptions as json_schema_exceptions
+
 from st2actions.runners import ActionRunner
 from st2common import log as logging
-from st2common.constants.action import (LIVEACTION_STATUS_SUCCEEDED, LIVEACTION_STATUS_FAILED)
+from st2common.constants.action import ACTION_CONTEXT_KV_PREFIX
+from st2common.constants.action import LIVEACTION_STATUS_SUCCEEDED
+from st2common.constants.action import LIVEACTION_STATUS_TIMED_OUT
+from st2common.constants.action import LIVEACTION_STATUS_FAILED
 from st2common.constants.action import LIVEACTION_STATUS_CANCELED
+from st2common.constants.action import LIVEACTION_COMPLETED_STATES
+from st2common.constants.action import LIVEACTION_FAILED_STATES
 from st2common.constants.system import SYSTEM_KV_PREFIX
 from st2common.content.loader import MetaLoader
+from st2common.exceptions.action import (ParameterRenderingFailedException,
+                                         InvalidActionReferencedException)
 from st2common.exceptions import actionrunner as runnerexceptions
 from st2common.models.api.notification import NotificationsHelper
 from st2common.models.db.liveaction import LiveActionDB
@@ -40,6 +49,11 @@ from st2common.util import jinja as jinja_utils
 
 LOG = logging.getLogger(__name__)
 RESULTS_KEY = '__results'
+JINJA_START_MARKERS = [
+    '{{',
+    '{%'
+]
+PUBLISHED_VARS_KEY = 'published'
 
 
 class ChainHolder(object):
@@ -47,32 +61,78 @@ class ChainHolder(object):
     def __init__(self, chainspec, chainname):
         self.actionchain = actionchain.ActionChain(**chainspec)
         self.chainname = chainname
+
         if not self.actionchain.default:
             default = self._get_default(self.actionchain)
             self.actionchain.default = default
+
         LOG.debug('Using %s as default for %s.', self.actionchain.default, self.chainname)
         if not self.actionchain.default:
             raise Exception('Failed to find default node in %s.' % (self.chainname))
-        # finalize the vars and save them around to be used at execution time.
-        self.vars = self._get_rendered_vars(self.actionchain.vars) if self.actionchain.vars else {}
+
+        self.vars = {}
+
+    def init_vars(self, action_parameters):
+        if self.actionchain.vars:
+            self.vars = self._get_rendered_vars(self.actionchain.vars,
+                                                action_parameters=action_parameters)
+
+    def validate(self):
+        """
+        Function which performs a simple compile time validation.
+
+        Keep in mind that some variables are only resolved during run time which means we can
+        perform only simple validation during compile / create time.
+        """
+        all_nodes = self._get_all_nodes(action_chain=self.actionchain)
+
+        for node in self.actionchain.chain:
+            on_success_node_name = node.on_success
+            on_failure_node_name = node.on_failure
+
+            # Check "on-success" path
+            valid_name = self._is_valid_node_name(all_node_names=all_nodes,
+                                                  node_name=on_success_node_name)
+            if not valid_name:
+                msg = ('Unable to find node with name "%s" referenced in "on-success" in '
+                       'task "%s".' % (on_success_node_name, node.name))
+                raise ValueError(msg)
+
+            # Check "on-failure" path
+            valid_name = self._is_valid_node_name(all_node_names=all_nodes,
+                                                  node_name=on_failure_node_name)
+            if not valid_name:
+                msg = ('Unable to find node with name "%s" referenced in "on-failure" in '
+                       'task "%s".' % (on_failure_node_name, node.name))
+                raise ValueError(msg)
+
+        # check if node specified in default is valid.
+        if self.actionchain.default:
+            valid_name = self._is_valid_node_name(all_node_names=all_nodes,
+                                                  node_name=self.actionchain.default)
+            if not valid_name:
+                msg = ('Unable to find node with name "%s" referenced in "default".' %
+                       self.actionchain.default)
+                raise ValueError(msg)
+        return True
 
     @staticmethod
-    def _get_default(_actionchain):
+    def _get_default(action_chain):
         # default is defined
-        if _actionchain.default:
-            return _actionchain.default
+        if action_chain.default:
+            return action_chain.default
         # no nodes in chain
-        if not _actionchain.chain:
+        if not action_chain.chain:
             return None
         # The first node with no references is the default node. Assumptions
         # that support this are :
         # 1. There are no loops in the chain. Even if there are loops there is
         #    at least 1 node which does not end up in this loop.
         # 2. There are no fragments in the chain.
-        all_nodes = [node.name for node in _actionchain.chain]
+        all_nodes = ChainHolder._get_all_nodes(action_chain=action_chain)
         node_names = set(all_nodes)
-        on_success_nodes = set([node.on_success for node in _actionchain.chain])
-        on_failure_nodes = set([node.on_failure for node in _actionchain.chain])
+        on_success_nodes = ChainHolder._get_all_on_success_nodes(action_chain=action_chain)
+        on_failure_nodes = ChainHolder._get_all_on_failure_nodes(action_chain=action_chain)
         referenced_nodes = on_success_nodes | on_failure_nodes
         possible_default_nodes = node_names - referenced_nodes
         if possible_default_nodes:
@@ -82,13 +142,58 @@ class ChainHolder(object):
                 if node in possible_default_nodes:
                     return node
         # If no node is found assume the first node in the chain list to be default.
-        return _actionchain.chain[0].name
+        return action_chain.chain[0].name
 
     @staticmethod
-    def _get_rendered_vars(vars):
+    def _get_all_nodes(action_chain):
+        """
+        Return names for all the nodes in the chain.
+        """
+        all_nodes = [node.name for node in action_chain.chain]
+        return all_nodes
+
+    @staticmethod
+    def _get_all_on_success_nodes(action_chain):
+        """
+        Return names for all the tasks referenced in "on-success".
+        """
+        on_success_nodes = set([node.on_success for node in action_chain.chain])
+        return on_success_nodes
+
+    @staticmethod
+    def _get_all_on_failure_nodes(action_chain):
+        """
+        Return names for all the tasks referenced in "on-failure".
+        """
+        on_failure_nodes = set([node.on_failure for node in action_chain.chain])
+        return on_failure_nodes
+
+    def _is_valid_node_name(self, all_node_names, node_name):
+        """
+        Function which validates that the provided node name is defined in the workflow definition
+        and it's valid.
+
+        Keep in mind that we can only perform validation for task names which don't include jinja
+        expressions since those are rendered at run time.
+        """
+        if not node_name:
+            # This task name needs to be resolved during run time so we cant validate the name now
+            return True
+
+        for jinja_start_marker in JINJA_START_MARKERS:
+            if jinja_start_marker in node_name:
+                # This task name needs to be resolved during run time so we cant validate the name
+                # now
+                return True
+
+        return node_name in all_node_names
+
+    @staticmethod
+    def _get_rendered_vars(vars, action_parameters):
         if not vars:
             return {}
         context = {SYSTEM_KV_PREFIX: KeyValueLookup()}
+        context.update(action_parameters)
         return jinja_utils.render_values(mapping=vars, context=context)
 
     def get_node(self, node_name=None, raise_on_failure=False):
@@ -121,6 +226,7 @@ class ActionChainRunner(ActionRunner):
         self._meta_loader = MetaLoader()
         self._stopped = False
         self._skip_notify_tasks = []
+        self._display_published = False
         self._chain_notify = None
 
     def pre_run(self):
@@ -139,6 +245,12 @@ class ActionChainRunner(ActionRunner):
 
         try:
             self.chain_holder = ChainHolder(chainspec, self.action_name)
+        except json_schema_exceptions.ValidationError as e:
+            # preserve the whole nasty jsonschema message as that is better to get to the
+            # root cause
+            message = str(e)
+            LOG.exception('Failed to instantiate ActionChain.')
+            raise runnerexceptions.ActionRunnerPreRunError(message)
         except Exception as e:
             message = e.message or str(e)
             LOG.exception('Failed to instantiate ActionChain.')
@@ -150,15 +262,29 @@ class ActionChainRunner(ActionRunner):
             self._chain_notify = getattr(self.liveaction, 'notify', None)
         if self.runner_parameters:
             self._skip_notify_tasks = self.runner_parameters.get('skip_notify', [])
+            self._display_published = self.runner_parameters.get('display_published', False)
+
+        # Perform some pre-run chain validation
+        try:
+            self.chain_holder.validate()
+        except Exception as e:
+            raise runnerexceptions.ActionRunnerPreRunError(e.message)
 
     def run(self, action_parameters):
-        result = {'tasks': []}  # holds final result we store
+        # holds final result we store.
+        result = {'tasks': []}
+        # published variables are to be stored for display.
+        if self._display_published:
+            result[PUBLISHED_VARS_KEY] = {}
         context_result = {}  # holds result which is used for the template context purposes
         top_level_error = None  # stores a reference to a top level error
         fail = True
         action_node = None
 
         try:
+            # initialize vars once we have the action_parameters. This allows
+            # vars to refer to action_parameters.
+            self.chain_holder.init_vars(action_parameters)
             action_node = self.chain_holder.get_next_node()
         except Exception as e:
             LOG.exception('Failed to get starting node "%s".', action_node.name)
@@ -171,19 +297,36 @@ class ActionChainRunner(ActionRunner):
                 'traceback': trace
             }
 
+        parent_context = {
+            'execution_id': self.execution_id
+        }
+        if getattr(self.liveaction, 'context', None):
+            parent_context.update(self.liveaction.context)
+
         while action_node:
             fail = False
+            timeout = False
             error = None
-            resolved_params = None
             liveaction = None
 
             created_at = date_utils.get_datetime_utc_now()
 
             try:
-                resolved_params = ActionChainRunner._resolve_params(
-                    action_node=action_node, original_parameters=action_parameters,
-                    results=context_result, chain_vars=self.chain_holder.vars)
-            except Exception as e:
+                liveaction = self._get_next_action(
+                    action_node=action_node, parent_context=parent_context,
+                    action_params=action_parameters, context_result=context_result)
+            except InvalidActionReferencedException as e:
+                error = ('Failed to run task "%s". Action with reference "%s" doesn\'t exist.' %
+                         (action_node.name, action_node.ref))
+                LOG.exception(error)
+
+                fail = True
+                top_level_error = {
+                    'error': error,
+                    'traceback': traceback.format_exc(10)
+                }
+                break
+            except ParameterRenderingFailedException as e:
                 # Rendering parameters failed before we even got to running this action, abort and
                 # fail the whole action chain
                 LOG.exception('Failed to run action "%s".', action_node.name)
@@ -198,27 +341,8 @@ class ActionChainRunner(ActionRunner):
                 }
                 break
 
-            # Verify that the referenced action exists
-            # TODO: We do another lookup in cast_param, refactor to reduce number of lookups
-            action_ref = action_node.ref
-            action_db = action_db_util.get_action_by_ref(ref=action_ref)
-
-            if not action_db:
-                error = ('Failed to run task "%s". Action with reference "%s" doesn\'t exist.' %
-                         (action_node.name, action_ref))
-                LOG.exception(error)
-
-                fail = True
-                top_level_error = {
-                    'error': error,
-                    'traceback': error
-                }
-                break
-
             try:
-                liveaction = self._run_action(
-                    action_node=action_node, parent_execution_id=self.liveaction_id,
-                    params=resolved_params)
+                liveaction = self._run_action(liveaction)
             except Exception as e:
                 # Save the traceback and error message
                 LOG.exception('Failure in running action "%s".', action_node.name)
@@ -240,6 +364,8 @@ class ActionChainRunner(ActionRunner):
 
                 if rendered_publish_vars:
                     self.chain_holder.vars.update(rendered_publish_vars)
+                    if self._display_published:
+                        result[PUBLISHED_VARS_KEY].update(rendered_publish_vars)
             finally:
                 # Record result and resolve a next node based on the task success or failure
                 updated_at = date_utils.get_datetime_utc_now()
@@ -254,37 +380,58 @@ class ActionChainRunner(ActionRunner):
                 result['tasks'].append(task_result)
 
                 if self.liveaction_id:
-                    self._stopped = action_service.is_action_canceled(self.liveaction_id)
+                    self._stopped = action_service.is_action_canceled_or_canceling(
+                        self.liveaction_id)
 
-                if not self._stopped:
-                    try:
-                        if not liveaction or liveaction.status == LIVEACTION_STATUS_FAILED:
-                            fail = True
-                            action_node = self.chain_holder.get_next_node(action_node.name,
-                                                                          condition='on-failure')
-                        elif liveaction.status == LIVEACTION_STATUS_SUCCEEDED:
-                            action_node = self.chain_holder.get_next_node(action_node.name,
-                                                                          condition='on-success')
-                    except Exception as e:
-                        LOG.exception('Failed to get next node "%s".', action_node.name)
+                if self._stopped:
+                    LOG.info('Chain execution (%s) canceled by user.', self.liveaction_id)
+                    status = LIVEACTION_STATUS_CANCELED
+                    return (status, result, None)
 
+                try:
+                    if not liveaction:
                         fail = True
-                        error = ('Failed to get next node "%s". Lookup failed: %s' %
-                                 (action_node.name, str(e)))
-                        trace = traceback.format_exc(10)
-                        top_level_error = {
-                            'error': error,
-                            'traceback': trace
-                        }
-                        # reset action_node here so that chain breaks on failure.
-                        action_node = None
-                else:
+                        action_node = self.chain_holder.get_next_node(action_node.name,
+                                                                      condition='on-failure')
+                    elif liveaction.status in LIVEACTION_FAILED_STATES:
+                        if liveaction and liveaction.status == LIVEACTION_STATUS_TIMED_OUT:
+                            timeout = True
+                        else:
+                            fail = True
+                        action_node = self.chain_holder.get_next_node(action_node.name,
+                                                                      condition='on-failure')
+                    elif liveaction.status == LIVEACTION_STATUS_CANCELED:
+                        # User canceled an action (task) in the workflow - cancel the execution of
+                        # rest of the workflow
+                        self._stopped = True
+                        LOG.info('Chain execution (%s) canceled by user.', self.liveaction_id)
+                    elif liveaction.status == LIVEACTION_STATUS_SUCCEEDED:
+                        action_node = self.chain_holder.get_next_node(action_node.name,
+                                                                      condition='on-success')
+                except Exception as e:
+                    LOG.exception('Failed to get next node "%s".', action_node.name)
+
+                    fail = True
+                    error = ('Failed to get next node "%s". Lookup failed: %s' %
+                             (action_node.name, str(e)))
+                    trace = traceback.format_exc(10)
+                    top_level_error = {
+                        'error': error,
+                        'traceback': trace
+                    }
+                    # reset action_node here so that chain breaks on failure.
+                    action_node = None
+                    break
+
+                if self._stopped:
                     LOG.info('Chain execution (%s) canceled by user.', self.liveaction_id)
                     status = LIVEACTION_STATUS_CANCELED
                     return (status, result, None)
 
         if fail:
             status = LIVEACTION_STATUS_FAILED
+        elif timeout:
+            status = LIVEACTION_STATUS_TIMED_OUT
         else:
             status = LIVEACTION_STATUS_SUCCEEDED
 
@@ -315,11 +462,21 @@ class ActionChainRunner(ActionRunner):
         context.update(chain_vars)
         context.update({RESULTS_KEY: previous_execution_results})
         context.update({SYSTEM_KV_PREFIX: KeyValueLookup()})
-        rendered_result = jinja_utils.render_values(mapping=action_node.publish, context=context)
+
+        try:
+            rendered_result = jinja_utils.render_values(mapping=action_node.publish,
+                                                        context=context)
+        except Exception as e:
+            key = getattr(e, 'key', None)
+            value = getattr(e, 'value', None)
+            msg = ('Failed rendering value for publish parameter "%s" in task "%s" '
+                   '(template string=%s): %s' % (key, action_node.name, value, str(e)))
+            raise ParameterRenderingFailedException(msg)
+
         return rendered_result
 
     @staticmethod
-    def _resolve_params(action_node, original_parameters, results, chain_vars):
+    def _resolve_params(action_node, original_parameters, results, chain_vars, chain_context):
         # setup context with original parameters and the intermediate results.
         context = {}
         context.update(original_parameters)
@@ -327,14 +484,65 @@ class ActionChainRunner(ActionRunner):
         context.update(chain_vars)
         context.update({RESULTS_KEY: results})
         context.update({SYSTEM_KV_PREFIX: KeyValueLookup()})
-        rendered_params = jinja_utils.render_values(mapping=action_node.params, context=context)
+        context.update({ACTION_CONTEXT_KV_PREFIX: chain_context})
+        try:
+            rendered_params = jinja_utils.render_values(mapping=action_node.get_parameters(),
+                                                        context=context)
+        except Exception as e:
+            LOG.exception('Jinja rendering for parameter "%s" failed.' % (e.key))
+
+            key = getattr(e, 'key', None)
+            value = getattr(e, 'value', None)
+            msg = ('Failed rendering value for action parameter "%s" in task "%s" '
+                   '(template string=%s): %s') % (key, action_node.name, value, str(e))
+            raise ParameterRenderingFailedException(msg)
         LOG.debug('Rendered params: %s: Type: %s', rendered_params, type(rendered_params))
         return rendered_params
 
-    def _run_action(self, action_node, parent_execution_id, params, wait_for_completion=True):
+    def _get_next_action(self, action_node, parent_context, action_params, context_result):
+        # Verify that the referenced action exists
+        # TODO: We do another lookup in cast_param, refactor to reduce number of lookups
+        task_name = action_node.name
+        action_ref = action_node.ref
+        action_db = action_db_util.get_action_by_ref(ref=action_ref)
+
+        if not action_db:
+            error = 'Task :: %s - Action with ref %s not registered.' % (task_name, action_ref)
+            raise InvalidActionReferencedException(error)
+
+        resolved_params = ActionChainRunner._resolve_params(
+            action_node=action_node, original_parameters=action_params,
+            results=context_result, chain_vars=self.chain_holder.vars,
+            chain_context={'parent': parent_context})
+
+        liveaction = self._build_liveaction_object(
+            action_node=action_node,
+            resolved_params=resolved_params,
+            parent_context=parent_context)
+
+        return liveaction
+
+    def _run_action(self, liveaction, wait_for_completion=True, sleep_delay=1.0):
+        """
+        :param sleep_delay: Number of seconds to wait during "is completed" polls.
+        :type sleep_delay: ``float``
+        """
+        try:
+            # request return canceled
+            liveaction, _ = action_service.request(liveaction)
+        except Exception as e:
+            liveaction.status = LIVEACTION_STATUS_FAILED
+            LOG.exception('Failed to schedule liveaction.')
+            raise e
+
+        while (wait_for_completion and liveaction.status not in LIVEACTION_COMPLETED_STATES):
+            eventlet.sleep(sleep_delay)
+            liveaction = action_db_util.get_liveaction_by_id(liveaction.id)
+
+        return liveaction
+
+    def _build_liveaction_object(self, action_node, resolved_params, parent_context):
         liveaction = LiveActionDB(action=action_node.ref)
-        liveaction.parameters = action_param_utils.cast_params(action_ref=action_node.ref,
-                                                               params=params)
 
         # Setup notify for task in chain.
         notify = self._get_notify(action_node)
@@ -343,18 +551,12 @@ class ActionChainRunner(ActionRunner):
             LOG.debug('%s: Task notify set to: %s', action_node.name, liveaction.notify)
 
         liveaction.context = {
-            'parent': str(parent_execution_id),
+            'parent': parent_context,
             'chain': vars(action_node)
         }
 
-        liveaction, _ = action_service.request(liveaction)
-
-        while (wait_for_completion and
-               liveaction.status != LIVEACTION_STATUS_SUCCEEDED and
-               liveaction.status != LIVEACTION_STATUS_FAILED):
-            eventlet.sleep(1)
-            liveaction = action_db_util.get_liveaction_by_id(liveaction.id)
-
+        liveaction.parameters = action_param_utils.cast_params(action_ref=action_node.ref,
+                                                               params=resolved_params)
         return liveaction
 
     def _get_notify(self, action_node):
@@ -374,8 +576,8 @@ class ActionChainRunner(ActionRunner):
 
         :rtype: ``dict``
         """
-        assert(isinstance(created_at, datetime.datetime))
-        assert(isinstance(updated_at, datetime.datetime))
+        assert isinstance(created_at, datetime.datetime)
+        assert isinstance(updated_at, datetime.datetime)
 
         result = {}
 

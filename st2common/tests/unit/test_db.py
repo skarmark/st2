@@ -303,6 +303,12 @@ class ActionModelTest(DbTestCase):
         retrieved = Action.get_by_id(saved.id)
         self.assertEqual(retrieved.notify.on_complete.message, on_complete.message)
 
+        # Now reset notify in action to empty and validate it's gone.
+        retrieved.notify = NotificationSchema(on_complete=None)
+        saved = Action.add_or_update(retrieved)
+        retrieved = Action.get_by_id(saved.id)
+        self.assertEqual(retrieved.notify.on_complete, None)
+
         # cleanup
         self._delete([retrieved])
         try:
@@ -317,7 +323,7 @@ class ActionModelTest(DbTestCase):
         retrieved = Action.get_by_id(saved.id)
 
         # validate generated schema
-        schema = util_schema.get_parameter_schema(retrieved)
+        schema = util_schema.get_schema_for_action_parameters(retrieved)
         self.assertDictEqual(schema, PARAM_SCHEMA)
         validator = util_schema.get_validator()
         validator.check_schema(schema)
@@ -339,6 +345,28 @@ class ActionModelTest(DbTestCase):
         except ValueError:
             retrieved = None
         self.assertIsNone(retrieved, 'managed to retrieve after failure.')
+
+    def test_parameters_schema_runner_and_action_parameters_are_correctly_merged(self):
+        # Test that the runner and action parameters are correctly deep merged when building
+        # action parameters schema
+
+        self._create_save_runnertype(metadata=True)
+
+        action_db = mock.Mock()
+        action_db.runner_type = {'name': 'python'}
+        action_db.parameters = {'r1': {'immutable': True}}
+
+        schema = util_schema.get_schema_for_action_parameters(action_db=action_db)
+        expected = {
+            u'type': u'object',
+            u'properties': {
+                u'r1a': {
+                    u'type': u'string'
+                }
+            },
+            'immutable': True
+        }
+        self.assertEqual(schema['properties']['r1'], expected)
 
     @staticmethod
     def _create_save_runnertype(metadata=False):
@@ -415,9 +443,7 @@ class KeyValuePairModelTest(DbTestCase):
 
     @staticmethod
     def _create_save_kvp():
-        created = KeyValuePairDB()
-        created.name = 'token'
-        created.value = '0123456789ABCDEF'
+        created = KeyValuePairDB(name='token', value='0123456789ABCDEF')
         return KeyValuePair.add_or_update(created)
 
     @staticmethod

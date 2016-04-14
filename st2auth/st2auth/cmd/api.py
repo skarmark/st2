@@ -23,24 +23,25 @@ from eventlet import wsgi
 from st2common import log as logging
 from st2common.service_setup import setup as common_setup
 from st2common.service_setup import teardown as common_teardown
+from st2common.util.monkey_patch import monkey_patch
 from st2common.constants.auth import VALID_MODES
 from st2auth import config
+config.register_opts()
 from st2auth import app
 
+__all__ = [
+    'main'
+]
 
-eventlet.monkey_patch(
-    os=True,
-    select=True,
-    socket=True,
-    thread=False if '--use-debugger' in sys.argv else True,
-    time=True)
+monkey_patch()
 
 LOG = logging.getLogger(__name__)
 
 
 def _setup():
     common_setup(service='auth', config=config, setup_db=True, register_mq_exchanges=False,
-                 register_signal_handlers=True)
+                 register_signal_handlers=True, register_internal_trigger_types=False,
+                 run_migrations=False)
 
     if cfg.CONF.auth.mode not in VALID_MODES:
         raise ValueError('Valid modes are: %s' % (','.join(VALID_MODES)))

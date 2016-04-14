@@ -1,26 +1,32 @@
 ---
-description: This sends an email
-enabled: true
-entry_point: send_mail/send_mail
 name: sendmail
+description: This sends an email
+entry_point: send_mail/send_mail
+runner_type: "local-shell-script"
+enabled: true
 parameters:
-  body:
-    description: Body of the email.
-    position: 3
+  from:
+    description: Sender email address.
+    position: 0
+    required: false
+    type: string
+    default: "stanley"
+  to:
+    description: Recipient email address.
+    position: 1
     required: true
     type: string
   subject:
     description: Subject of the email.
-    position: 1
+    position: 2
     required: true
     type: string
-  sudo:
-    immutable: true
-  to:
-    description: Recipient email address.
-    position: 0
-    required: true
-    type: string
+  send_empty_body:
+    description: Send a message even if the body is empty.
+    position: 3
+    required: false
+    type: boolean
+    default: True
   content_type:
     type: string
     description: Content type of message to be sent
@@ -29,10 +35,15 @@ parameters:
       - "text/html"
     default: "text/html"
     position: 4
-  send_empty_body:
-    description: Send a message even if the body is empty.
-    position: 2
+  body:
+    description: Body of the email.
+    position: 5
+    required: true
+    type: string
+  sudo:
+    immutable: true
+  attachments:
+    description: Array of attachment file paths, comma-delimited.
+    position: 6
     required: false
-    type: boolean
-    default: True
-runner_type: "local-shell-script"
+    type: "string"

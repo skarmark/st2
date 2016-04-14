@@ -15,6 +15,7 @@
 
 from __future__ import absolute_import
 
+import os
 import sys
 import logging
 import logging.config
@@ -23,7 +24,6 @@ import traceback
 from functools import wraps
 
 import six
-from oslo_config import cfg
 
 from st2common.logging.filters import ExclusionFilter
 
@@ -31,6 +31,7 @@ from st2common.logging.filters import ExclusionFilter
 from st2common.logging.handlers import FormatNamedFileHandler
 from st2common.logging.handlers import ConfigurableSyslogHandler
 from st2common.util.misc import prefix_dict_keys
+from st2common.util.misc import get_normalized_file_path
 
 __all__ = [
     'getLogger',
@@ -57,6 +58,36 @@ LOGGER_KEYS = [
     'audit'
 ]
 
+# Note: This attribute is used by "find_caller" so it can correctly exclude this file when looking
+# for the logger method caller frame.
+_srcfile = get_normalized_file_path(__file__)
+
+
+def find_caller():
+    """
+    Find the stack frame of the caller so that we can note the source file name, line number and
+    function name.
+
+    Note: This is based on logging/__init__.py:findCaller and modified so it takes into account
+    this file - https://hg.python.org/cpython/file/2.7/Lib/logging/__init__.py#l1233
+    """
+    rv = '(unknown file)', 0, '(unknown function)'
+
+    try:
+        f = logging.currentframe().f_back
+        while hasattr(f, 'f_code'):
+            co = f.f_code
+            filename = os.path.normcase(co.co_filename)
+            if filename in (_srcfile, logging._srcfile):  # This line is modified.
+                f = f.f_back
+                continue
+            rv = (filename, f.f_lineno, co.co_name)
+            break
+    except Exception:
+        pass
+
+    return rv
+
 
 def decorate_log_method(func):
     @wraps(func)
@@ -64,7 +95,19 @@ def decorate_log_method(func):
         # Prefix extra keys with underscore
         if 'extra' in kwargs:
             kwargs['extra'] = prefix_dict_keys(dictionary=kwargs['extra'], prefix='_')
-        return func(*args, **kwargs)
+
+        try:
+            return func(*args, **kwargs)
+        except TypeError as e:
+            # In some version of Python 2.7, logger.exception doesn't take any kwargs so we need
+            # this hack :/
+            # See:
+            # - https://docs.python.org/release/2.7.3/library/logging.html#logging.Logger.exception
+            # - https://docs.python.org/release/2.7.7/library/logging.html#logging.Logger.exception
+            if 'got an unexpected keyword argument \'extra\'' in str(e):
+                kwargs.pop('extra', None)
+                return func(*args, **kwargs)
+            raise e
     return func_wrapper
 
 
@@ -74,6 +117,12 @@ def decorate_logger_methods(logger):
     automatically prefixed with an underscore to avoid clashes with standard log
     record attributes.
     """
+
+    # Note: We override findCaller with our custom implementation which takes into account this
+    # module.
+    # This way filename, module, funcName and lineno LogRecord attributes contain correct values
+    # instead of all pointing to decorate_log_method.
+    logger.findCaller = find_caller
     for key in LOGGER_KEYS:
         log_method = getattr(logger, key)
         log_method = decorate_log_method(log_method)
@@ -83,8 +132,14 @@ def decorate_logger_methods(logger):
 
 
 def getLogger(name):
-    logger_name = 'st2.{}'.format(name)
-    logger = logging.getLogger(logger_name)
+    # make sure that prefix isn't appended multiple times to preserve logging name hierarchy
+    prefix = 'st2.'
+    if name.startswith(prefix):
+        logger = logging.getLogger(name)
+    else:
+        logger_name = '{}{}'.format(prefix, name)
+        logger = logging.getLogger(logger_name)
+
     logger = decorate_logger_methods(logger=logger)
     return logger
 
@@ -98,6 +153,9 @@ class LoggingStream(object):
     def write(self, message):
         self._logger._log(self._level, message, None)
 
+    def flush(self):
+        pass
+
 
 def _audit(logger, msg, *args, **kwargs):
     if logger.isEnabledFor(logging.AUDIT):
@@ -106,18 +164,18 @@ def _audit(logger, msg, *args, **kwargs):
 logging.Logger.audit = _audit
 
 
-def _add_exclusion_filters(handlers):
-    for h in handlers:
-        h.addFilter(ExclusionFilter(cfg.CONF.log.excludes))
+def _add_exclusion_filters(handlers, excludes=None):
+    if excludes:
+        for h in handlers:
+            h.addFilter(ExclusionFilter(excludes))
 
 
 def _redirect_stderr():
     # It is ok to redirect stderr as none of the st2 handlers write to stderr.
-    if cfg.CONF.log.redirect_stderr:
-        sys.stderr = LoggingStream('STDERR')
+    sys.stderr = LoggingStream('STDERR')
 
 
-def setup(config_file, disable_existing_loggers=False):
+def setup(config_file, redirect_stderr=True, excludes=None, disable_existing_loggers=False):
     """
     Configure logging from file.
     """
@@ -126,8 +184,9 @@ def setup(config_file, disable_existing_loggers=False):
                                   defaults=None,
                                   disable_existing_loggers=disable_existing_loggers)
         handlers = logging.getLoggerClass().manager.root.handlers
-        _add_exclusion_filters(handlers)
-        _redirect_stderr()
+        _add_exclusion_filters(handlers=handlers, excludes=excludes)
+        if redirect_stderr:
+            _redirect_stderr()
     except Exception as exc:
         # revert stderr redirection since there is no logger in place.
         sys.stderr = sys.__stderr__
